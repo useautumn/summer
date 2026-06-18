@@ -1,0 +1,4 @@
+node_modules
+.summer
+dist
+*.log
