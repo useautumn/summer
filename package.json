@@ -1,17 +1,25 @@
 {
   "name": "@useautumn/summer",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Local AI coding usage meter for Autumn.",
   "type": "module",
   "bin": {
     "summer": "./src/cli.ts"
   },
+  "files": [
+    "src",
+    "dash/dist",
+    "README.md",
+    "SPEC.md"
+  ],
   "scripts": {
     "d": "SUMMER_AUTUMN_API_URL=https://api.useautumn.com SUMMER_AUTUMN_APP_URL=https://app.useautumn.com bun src/cli.ts",
     "dl": "SUMMER_AUTUMN_API_URL=http://localhost:8080 SUMMER_AUTUMN_APP_URL=http://localhost:3000 bun src/cli.ts",
     "dev": "SUMMER_AUTUMN_API_URL=http://localhost:8080 SUMMER_AUTUMN_APP_URL=http://localhost:3000 bun src/cli.ts",
     "ts": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "build:dash": "cd dash && bun install && bun run build",
+    "release": "bun run ts && bun run build:dash && bun publish --access public"
   },
   "dependencies": {
     "arctic": "^3.7.0",

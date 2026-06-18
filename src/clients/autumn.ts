@@ -92,24 +92,50 @@ export class AutumnClient {
 
   async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     return this.withRefresh(async () => {
-      const response = await fetch(new URL(path, this.apiUrl), {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          "Content-Type": "application/json",
-          "X-API-Version": "2.1.0"
-        },
-        body: body === undefined ? undefined : JSON.stringify(body)
-      });
+      const maxAttempts = 5;
+      for (let attempt = 1; ; attempt += 1) {
+        const response = await fetch(new URL(path, this.apiUrl), {
+          method,
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            "Content-Type": "application/json",
+            "X-API-Version": "2.1.0"
+          },
+          body: body === undefined ? undefined : JSON.stringify(body)
+        });
 
-      const text = await response.text();
-      const data = text ? JSON.parse(text) : null;
-      if (!response.ok) {
-        throw new Error(
-          `Autumn ${method} ${path} failed (${response.status}): ${text}`
-        );
+        const text = await response.text();
+
+        if (response.ok) {
+          if (!text) return null as T;
+          // Tolerate a non-JSON success body rather than throwing a parse error.
+          try {
+            return JSON.parse(text) as T;
+          } catch {
+            return null as T;
+          }
+        }
+
+        // Back off + retry on rate limits (429) and transient 5xx, honoring Retry-After.
+        if ((response.status === 429 || response.status >= 500) && attempt < maxAttempts) {
+          const retryAfter = Number(response.headers.get("retry-after"));
+          const delayMs =
+            Number.isFinite(retryAfter) && retryAfter > 0
+              ? retryAfter * 1000
+              : Math.min(500 * 2 ** (attempt - 1), 8000);
+          log.debug({ action: "autumn_request_retry", path, status: response.status, attempt, delayMs });
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          continue;
+        }
+
+        const error = new Error(
+          `Autumn ${method} ${path} failed (${response.status}): ${text.slice(0, 200)}`
+        ) as Error & { statusCode?: number; status?: number; body?: string };
+        error.statusCode = response.status;
+        error.status = response.status;
+        error.body = text;
+        throw error;
       }
-      return data as T;
     });
   }
 

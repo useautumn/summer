@@ -345,6 +345,9 @@ function printBackfill(res: BackfillResult) {
     // Backfill sends async, so Autumn prices the events shortly — `value` isn't in the response.
     const usdPart = res.usd > 0 ? `   Total: $${res.usd.toFixed(4)}` : "   (values pricing in Autumn…)";
     console.log(`Sent: ${res.sent}   Skipped (already imported): ${res.skipped}${usdPart}`);
+    if (res.failed > 0) {
+      console.log(`Failed: ${res.failed} bucket(s) — re-run \`summer backfill\` to retry (idempotent).`);
+    }
   }
   console.log();
 }

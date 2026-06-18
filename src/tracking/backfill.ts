@@ -58,6 +58,7 @@ export type BackfillResult = {
   buckets: BackfillBucket[];
   sent: number;
   skipped: number;
+  failed: number;
   usd: number;
   byHarness: Record<string, { buckets: number; inputTokens: number; outputTokens: number; usd: number }>;
 };
@@ -216,7 +217,7 @@ function bucketize(records: UsageRecord[], g: Granularity): BackfillBucket[] {
 }
 
 /** Max in-flight track_tokens requests during backfill — bounds load on Autumn. */
-const BACKFILL_CONCURRENCY = Math.max(1, Number(process.env.SUMMER_BACKFILL_CONCURRENCY ?? 4));
+const BACKFILL_CONCURRENCY = Math.max(1, Number(process.env.SUMMER_BACKFILL_CONCURRENCY ?? 2));
 
 /** Run `worker` over `items` with at most `concurrency` promises in flight. */
 async function runPool<T>(items: T[], worker: (item: T) => Promise<void>, concurrency: number): Promise<void> {
@@ -243,6 +244,17 @@ export async function runBackfill(
 ): Promise<BackfillResult> {
   const customerId = auth.user?.id;
   if (!customerId) throw new Error("Summer auth is missing user.id");
+
+  // Ensure the customer exists + is cached in Autumn BEFORE we enqueue any usage. Backfill events
+  // are sent async; if the customer isn't there when the worker processes them, they fail server-side
+  // and never become events — so the dedup scan never sees them and they re-send on every run.
+  if (auth.user) {
+    try {
+      await client.getOrCreateCustomer(auth.user);
+    } catch (error) {
+      log.warn({ action: "backfill_ensure_customer_failed", error: serializeError(error) });
+    }
+  }
 
   // One scan of THIS org's events = the source of truth (auto-cap + already-imported buckets).
   const { earliestLiveMs, backfillKeys } = await scanExistingEvents(client, customerId);
@@ -271,6 +283,7 @@ export async function runBackfill(
     buckets,
     sent: 0,
     skipped: 0,
+    failed: 0,
     usd: 0,
     byHarness: {}
   };
@@ -297,6 +310,8 @@ export async function runBackfill(
   // Send each bucket with `async: true` so Autumn ENQUEUES it (202, no synchronous balance work),
   // and cap in-flight requests so a big import never floods Autumn. Async responses omit `value`,
   // so the priced $ shows up in Autumn shortly rather than in this summary.
+  // Buckets that error (after the client's own 429/5xx backoff) are collected for one retry sweep.
+  const failures: BackfillBucket[] = [];
   const sendBucket = async (b: BackfillBucket) => {
     const idempotencyBase = `backfill:${b.harness}:${b.model}:${b.billingMode}:${opts.granularity}:${b.label}`;
     const idempotencyKey = opts.idempotencySalt ? `${idempotencyBase}:${opts.idempotencySalt}` : idempotencyBase;
@@ -326,15 +341,29 @@ export async function runBackfill(
       result.sent += 1;
       result.usd += value;
       bump(b.harness, { usd: value });
+      return true;
     } catch (error) {
       if (isDuplicateIdempotency(error)) {
         result.skipped += 1;
-      } else {
-        log.warn({ action: "backfill_track_failed", error: serializeError(error), bucket: b.label, harness: b.harness });
+        return true;
       }
+      log.warn({ action: "backfill_track_failed", error: serializeError(error), bucket: b.label, harness: b.harness });
+      return false;
     }
   };
-  await runPool(toSend, sendBucket, BACKFILL_CONCURRENCY);
+  await runPool(toSend, async (b) => {
+    if (!(await sendBucket(b))) failures.push(b);
+  }, BACKFILL_CONCURRENCY);
+
+  // One retry sweep for buckets that failed to send (idempotency makes re-sends safe).
+  if (failures.length > 0) {
+    log.info({ action: "backfill_retry_sweep", count: failures.length });
+    const retrying = failures.splice(0);
+    await runPool(retrying, async (b) => {
+      if (!(await sendBucket(b))) failures.push(b);
+    }, 1);
+  }
+  result.failed = failures.length;
 
   {
     const fresh = await readState();
