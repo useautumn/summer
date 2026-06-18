@@ -24,8 +24,10 @@ summer start
 2. **Sets up your Autumn org** — confirms which org to use and creates Summer's usage feature there.
 3. **Offers to backfill** your existing Claude Code + Codex history so the dashboard isn't empty on day one.
 
-It then points Claude Code's and Codex's telemetry at a local receiver and runs in the
-background. Just use your tools as usual — usage is tracked automatically.
+It then points Claude Code's and Codex's telemetry at a local receiver and installs a small
+**autostart service** (launchd on macOS, systemd `--user` on Linux) so Summer keeps running
+across logouts and reboots. Just use your tools as usual — usage is tracked automatically.
+(Pass `--no-service` to run as a plain background process instead.)
 
 ```bash
 summer dash      # open the dashboard (alias: summer dashboard)
@@ -58,7 +60,8 @@ That's it — their usage shows up alongside yours in the dashboard.
 | `summer backfill` | Import historical Claude Code + Codex usage (backdated). |
 | `summer report` | Usage rollup in the terminal. |
 | `summer status` | Auth + local state. |
-| `summer stop` | Stop and restore harness settings. |
+| `summer stop` | Stop and restore harness settings (also removes autostart). |
+| `summer service install` / `uninstall` / `status` | Manage on-boot autostart. |
 | `summer login` / `logout` | Manage Autumn auth. |
 
 ## How it works

@@ -22,7 +22,14 @@ import { patchClaudeSettings, restoreClaudeSettings } from "../integrations/clau
 import { patchCodexSettings, restoreCodexSettings } from "../integrations/codex/settings.ts";
 import { choose, confirm, isInteractive } from "./prompts.ts";
 import { bold, dim } from "./style.ts";
-import { log } from "../logging/logger.ts";
+import {
+  installService,
+  serviceKind,
+  serviceStatus,
+  type ServiceKind,
+  uninstallService
+} from "./service.ts";
+import { log, serializeError } from "../logging/logger.ts";
 
 async function ensureCustomer() {
   const auth = await requireAuth();
@@ -410,7 +417,11 @@ program
     await new Promise(() => undefined); // keep the server alive until Ctrl+C
   });
 
-function printStartSummary(auth: SummerAuth, port: number, opts: { pid?: number | null; foreground?: boolean }) {
+function printStartSummary(
+  auth: SummerAuth,
+  port: number,
+  opts: { pid?: number | null; foreground?: boolean; autostart?: ServiceKind | null }
+) {
   const line = "─".repeat(56);
   const how = opts.foreground ? " (foreground)" : opts.pid ? ` (pid ${opts.pid})` : "";
   console.log(`\nSummer is running${how}.`);
@@ -419,6 +430,9 @@ function printStartSummary(auth: SummerAuth, port: number, opts: { pid?: number 
   console.log(`Developer:    ${auth.user?.email ?? auth.user?.id}`);
   console.log(`OTLP:         http://${LOCALHOST}:${port}/v1/logs`);
   console.log(`Dashboard:    ${auth.appUrl}`);
+  console.log(
+    `Autostart:    ${opts.autostart ? `on (${opts.autostart}) — restarts on login/reboot` : "off"}`
+  );
   console.log(line);
   console.log("Next: use Claude Code or Codex as usual — usage is tracked automatically.");
   console.log("View it with `summer report` or `summer dash`.");
@@ -476,6 +490,7 @@ program
   .option("--switch-org", "Log in again to choose a different Autumn org before setup.")
   .option("--backfill", "Import existing history after setup without prompting.")
   .option("--skip-backfill", "Don't import existing history.")
+  .option("--no-service", "Don't install the on-boot autostart service.")
   .action(
     async (options: {
       debug?: boolean;
@@ -483,6 +498,7 @@ program
       switchOrg?: boolean;
       backfill?: boolean;
       skipBackfill?: boolean;
+      service?: boolean;
     }) => {
       const debug = Boolean(options.debug || program.opts<{ debug?: boolean }>().debug);
       const { auth, firstRun } = await ensureSetup({ yes: options.yes, switchOrg: options.switchOrg });
@@ -511,36 +527,130 @@ program
         return;
       }
 
+      // Prefer the OS autostart service so Summer survives reboots; the service (launchd/
+      // systemd) owns the daemon, so we don't also spawn a detached one. Fall back to a
+      // detached process when autostart is unsupported or opted out.
+      const useService = options.service !== false && serviceKind() !== null;
+      if (useService) {
+        await stopDaemon().catch(() => undefined); // hand the port to the service
+        let kind: ServiceKind | null = null;
+        try {
+          kind = await installService(port);
+          await waitForDaemon(port);
+          await writeState({
+            ...(await readState()),
+            service: { kind, port, installedAt: new Date().toISOString() },
+            daemon: { pid: 0, port, startedAt: new Date().toISOString() }
+          });
+        } catch (error) {
+          log.warn({ action: "service_install_failed", error: serializeError(error) });
+          console.log("Couldn't install the autostart service — starting in the background instead.");
+          kind = null;
+        }
+        if (kind) {
+          printStartSummary(auth, port, { autostart: kind });
+          return;
+        }
+      }
+
       const pid = await startDaemon(port);
-      printStartSummary(auth, port, { pid });
+      printStartSummary(auth, port, { pid, autostart: null });
     }
   );
 
 program.command("stop").description("Stop Summer and restore local harness settings.").action(async () => {
+  await uninstallService().catch(() => undefined);
   await stopDaemon();
+  await writeState({ ...(await readState()), service: undefined });
   await restoreClaudeSettings();
   await restoreCodexSettings();
   console.log("Summer stopped.");
 });
 
-program.command("status").description("Show Summer status.").action(async () => {
-  const auth = await readAuth();
-  const state = await readState();
-  console.log(JSON.stringify({
-    auth: auth
-      ? {
-          apiUrl: auth.apiUrl,
-          appUrl: auth.appUrl,
-          org: auth.org,
-          user: auth.user,
-          hasAccessToken: Boolean(auth.accessToken),
-          hasRefreshToken: Boolean(auth.refreshToken)
-        }
-      : null,
-    state,
-    statePath: statePath()
-  }, null, 2));
-});
+const service = program
+  .command("service")
+  .description("Manage the on-boot autostart service (launchd / systemd).");
+
+service
+  .command("install")
+  .description("Install the autostart service so Summer runs on login/reboot.")
+  .action(async () => {
+    if (!serviceKind()) {
+      console.log(`Autostart isn't supported on ${process.platform} yet.`);
+      return;
+    }
+    await ensureCustomer();
+    const state = await readState();
+    const port = state.service?.port ?? state.daemon?.port ?? (await resolveAvailableOtlpPort());
+    await patchClaudeSettings(port);
+    await patchCodexSettings(port);
+    await stopDaemon().catch(() => undefined);
+    const kind = await installService(port);
+    await waitForDaemon(port);
+    await writeState({
+      ...(await readState()),
+      service: { kind, port, installedAt: new Date().toISOString() },
+      daemon: { pid: 0, port, startedAt: new Date().toISOString() }
+    });
+    console.log(`Autostart enabled (${kind}) — Summer will run on login/reboot.`);
+  });
+
+service
+  .command("uninstall")
+  .description("Remove the autostart service.")
+  .action(async () => {
+    await uninstallService();
+    await writeState({ ...(await readState()), service: undefined });
+    console.log("Autostart disabled.");
+  });
+
+service
+  .command("status")
+  .description("Show autostart service status.")
+  .action(async () => {
+    const state = await readState();
+    const port = state.service?.port ?? state.daemon?.port ?? getOtlpPort();
+    const status = await serviceStatus(port);
+    if (!status.kind) {
+      console.log(`Autostart: unsupported on ${process.platform}`);
+      return;
+    }
+    console.log(`Autostart: ${status.installed ? "installed" : "not installed"} (${status.kind})`);
+    console.log(`Daemon:    ${status.running ? `running on :${port}` : "not running"}`);
+  });
+
+program
+  .command("status")
+  .description("Show whether the Summer daemon is running.")
+  .option("--json", "Print full auth + state as JSON.")
+  .action(async (opts: { json?: boolean }) => {
+    if (opts.json) {
+      const auth = await readAuth();
+      const state = await readState();
+      console.log(JSON.stringify({
+        auth: auth
+          ? {
+              apiUrl: auth.apiUrl,
+              appUrl: auth.appUrl,
+              org: auth.org,
+              user: auth.user,
+              hasAccessToken: Boolean(auth.accessToken),
+              hasRefreshToken: Boolean(auth.refreshToken)
+            }
+          : null,
+        state,
+        statePath: statePath()
+      }, null, 2));
+      return;
+    }
+
+    const daemon = await getRunningDaemon();
+    if (daemon) {
+      console.log(`Summer daemon: running (pid ${daemon.pid}, port ${daemon.port})`);
+    } else {
+      console.log("Summer daemon: not running — start it with `summer start`.");
+    }
+  });
 
 program
   .command("serve", { hidden: true })
