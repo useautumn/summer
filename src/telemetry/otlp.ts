@@ -70,6 +70,19 @@ export function visitLogRecords(payload: unknown): Record<string, unknown>[] {
   return records;
 }
 
+/** The log record's event time in epoch ms, from OTLP `timeUnixNano` (ns). Undefined if absent. */
+export function otelTimestampMs(attrs: Record<string, unknown>): number | undefined {
+  const ns = numberAttr(
+    attrs,
+    "timeUnixNano",
+    "time_unix_nano",
+    "observedTimeUnixNano",
+    "observed_time_unix_nano"
+  );
+  if (ns == null || ns <= 0) return undefined;
+  return Math.round(ns / 1e6);
+}
+
 export function logRecordAttributes(record: Record<string, unknown>) {
   return {
     ...record,

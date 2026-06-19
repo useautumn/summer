@@ -22,7 +22,7 @@ export type SummerUser = {
   name?: string | null;
 };
 
-export type UsageHarness = "claude_code" | "codex";
+export type UsageHarness = "claude_code" | "codex" | "opencode";
 
 /**
  * How a developer's AI usage is paid for, derived from telemetry:
@@ -88,12 +88,14 @@ export type SummerState = {
   >;
   /** Latest Codex plan utilization (from session rate_limits), for metadata sync. */
   codexUsage?: { at: string; fiveHourPct?: number; sevenDayPct?: number; planType?: string | null };
+  /** opencode assistant-message ids already tracked (id → createdMs), pruned to the recent window. */
+  opencodeSeen?: Record<string, number>;
   /** The Autumn org the user confirmed to set Summer up in — gates the `start`/`setup` org prompt. */
   setup?: { orgId: string; confirmedAt: string };
   /** The installed on-boot autostart service (launchd on macOS, systemd --user on Linux). */
   service?: { kind: "launchd" | "systemd"; port: number; installedAt: string };
-  /** Epoch ms when live tracking first recorded an event (informational; backfill derives its
-   * auto-cap from Autumn's events.list, not from this). */
+  /** Epoch ms when live tracking first recorded an event. Informational only — backfill fills gaps
+   * per (harness, model, bucket) from Autumn's events.list, it does not cap on this. */
   liveTrackingSince?: number;
   /** ISO timestamp of the first time `start` offered an interactive backfill. Once set, `start`
    * stops auto-prompting — the user can still import anytime via `summer backfill`. */
@@ -131,6 +133,9 @@ export type SummerUsageEvent = {
   requestId?: string;
   sessionId?: string;
   source?: string;
+  /** Usage time (epoch ms) from the harness event, so live events land on the day they happened
+   * (not ingestion time) — keeps live + backfill day-bucketing consistent. */
+  timestampMs?: number;
   raw: Record<string, unknown>;
 };
 

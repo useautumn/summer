@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { refreshAuth } from "../auth/oauth.ts";
 import { AutumnClient } from "../clients/autumn.ts";
 import { SUMMER_FEATURES } from "../config/constants.ts";
 import { readAuth, readState } from "../config/storage.ts";
@@ -9,6 +8,7 @@ import { createLogger, log, serializeError } from "../logging/logger.ts";
 import { trackUsageEvent } from "../tracking/tracker.ts";
 import { processClaudeOauthUsage } from "../tracking/oauthUsage.ts";
 import { processCodexSessions } from "../integrations/codex/sessions.ts";
+import { processOpencodeSessions } from "../integrations/opencode/sessions.ts";
 import { syncCustomerMetadata } from "../tracking/metadata.ts";
 
 export async function serveForeground(port = 4318, options: { debug?: boolean } = {}) {
@@ -25,16 +25,16 @@ export async function serveForeground(port = 4318, options: { debug?: boolean } 
     });
 
     try {
-      const storedAuth = await readAuth();
-      if (!storedAuth) {
+      const auth = await readAuth();
+      if (!auth) {
         ingestLog.setLevel("warn");
         ingestLog.set({ outcome: "unauthenticated" });
         return c.json({ error: "Summer is not authenticated" }, 401);
       }
-      const auth =
-        storedAuth.expiresAt && storedAuth.expiresAt <= Date.now() + 5 * 60_000
-          ? await refreshAuth(storedAuth)
-          : storedAuth;
+      // Do NOT refresh here. AutumnClient handles 401 + token refresh through the cross-process
+      // single-flight lock; refreshing in this handler too would be a second, uncoordinated
+      // refresher that races the pollers/dash (burning the rotating refresh token → invalid_grant)
+      // and 500s the whole request on failure. An expired token self-heals on the first 401.
 
       const payload = await c.req.json();
       const events = [
@@ -130,6 +130,20 @@ export async function serveForeground(port = 4318, options: { debug?: boolean } 
   };
   setTimeout(pollCodex, 5_000);
   setInterval(pollCodex, codexIntervalMs);
+
+  // Poll opencode session message JSON (per-message token counts) for live usage.
+  const opencodeIntervalMs = Math.max(15_000, Number(process.env.SUMMER_OPENCODE_INTERVAL_MS ?? 30_000));
+  const pollOpencode = async () => {
+    try {
+      const ocAuth = await readAuth();
+      if (!ocAuth) return;
+      await processOpencodeSessions(new AutumnClient(ocAuth), ocAuth);
+    } catch (error) {
+      log.warn({ action: "opencode_poll_error", error: serializeError(error) });
+    }
+  };
+  setTimeout(pollOpencode, 7_000);
+  setInterval(pollOpencode, opencodeIntervalMs);
 
   // Cron: sync plan + usage% onto the Autumn customer metadata (for the dashboard to read).
   const metadataIntervalMs = Math.max(60_000, Number(process.env.SUMMER_METADATA_INTERVAL_MS ?? 5 * 60_000));

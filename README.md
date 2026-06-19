@@ -1,44 +1,41 @@
-# Summer
+# Spring
 
-Summer is a local, open-source tool for AI-coding **usage and spend**, built by
-[Autumn](https://useautumn.com). Per developer, across **Claude Code** and **Codex**, it
-answers: how much is each engineer using, on what models, and what's it worth?
+Spring is a local, open-source tool for AI-coding **usage and spend**, built by
+[Autumn](https://useautumn.com). Per developer, across **Claude Code**, **Codex**, and
+**opencode**, it answers: how much is each engineer using, on what models, and what's it worth?
 
-![Summer dashboard](docs/dashboard.png)
+![Spring dashboard](docs/dashboard.png)
 
-## Install
+## How it works
+
+Spring needs **zero hosting**. It uses [Autumn](https://useautumn.com) as its backend —
+Autumn stores every usage event, prices tokens (via [Models.dev](https://models.dev)), and
+aggregates usage across your whole team.
+
+## Get started
+
+> **Note:** If you already have an Autumn org, create a **new org** to use with Spring.
 
 ```bash
-bun -g install @useautumn/summer
-```
+bun -g install @useautumn/summer   # install Spring
 
-## Quick start
+summer start                        # set up, then track usage in the background
 
-```bash
-summer start
+summer dash                         # open the usage dashboard
 ```
 
 `summer start` does everything first-time setup needs:
 
-1. **Logs you in** to Autumn (opens a browser) if you aren't already.
-2. **Sets up your Autumn org** — confirms which org to use and creates Summer's usage feature there.
-3. **Offers to backfill** your existing Claude Code + Codex history so the dashboard isn't empty on day one.
-
-It then points Claude Code's and Codex's telemetry at a local receiver and installs a small
-**autostart service** (launchd on macOS, systemd `--user` on Linux) so Summer keeps running
-across logouts and reboots. Just use your tools as usual — usage is tracked automatically.
-(Pass `--no-service` to run as a plain background process instead.)
-
-```bash
-summer dash      # open the dashboard (alias: summer dashboard)
-summer stop      # stop and restore your Claude Code / Codex settings
-```
-
-## Dashboard
+1. **Authenticates with Autumn** via OAuth — logs you in (or signs you up) and sets up your org.
+2. **Offers to backfill** your history.
+3. **Starts a local daemon** to collect Claude Code + Codex usage and send it to Autumn.
 
 `summer dash` serves a local UI (and opens it in your browser): a usage chart you can
 **group by** harness / model / user / billing mode, **filter** by any property, search
 **per-developer** usage, and inspect the raw **events**.
+
+> **Note:** Spring installs an autostart service (launchd/systemd) so it survives reboots —
+> just use your tools as usual. Pass `--no-service` for a plain background process.
 
 ## Invite your team
 
@@ -64,30 +61,6 @@ That's it — their usage shows up alongside yours in the dashboard.
 | `summer service install` / `uninstall` / `status` | Manage on-boot autostart. |
 | `summer login` / `logout` | Manage Autumn auth. |
 
-## How it works
+## Harnesses Supported
 
-Each developer is an Autumn customer. Token usage is captured locally via OpenTelemetry
-(Claude Code) and session logs (Codex), priced by Autumn via
-[Models.dev](https://models.dev), and recorded as **`usage_in_usd`** with properties like
-`harness`, `model`, `user_email`, and `billing_mode` (`subscription` = value covered by
-your plan, `api` = real pay-per-token spend).
-
-## Pricing & accuracy
-
-Token **counts** are captured exactly (they match `ccusage` to within rounding on both
-harnesses). The **dollar** figures use Models.dev's **standard-tier** rates, with one
-deliberate simplification worth knowing:
-
-- **Priority / "fast" service tier is not surcharged.** If you run Codex with
-  `service_tier = "fast"` (or Claude Code in fast mode), the provider bills a premium —
-  Models.dev lists it at ~**2.5×** standard for `gpt-5.5`, for example. Summer sends raw
-  token counts and Autumn prices them at the **standard** rate, so it does **not** apply
-  that premium. Tools like `ccusage` detect the tier and multiply, so their totals can run
-  meaningfully higher (≈25% on heavy priority-tier Codex). Summer's number is best read as
-  **standard-rate spend**, not a priority-tier invoice.
-- Autumn applies Models.dev's >200k-context tier to each daily aggregate, which can slightly
-  over-price a day made up of small (<200k-token) requests.
-
-Both are pricing-method differences, not capture errors. Modeling the priority tier
-accurately would mean pricing client-side (the path `ccusage` takes) rather than relying on
-Autumn's per-token pricing.
+Claude Code, Codex, OpenCode

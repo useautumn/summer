@@ -1,6 +1,6 @@
 {
   "name": "@useautumn/summer",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "Local AI coding usage meter for Autumn.",
   "type": "module",
   "bin": {
@@ -19,7 +19,7 @@
     "ts": "tsc --noEmit",
     "test": "bun test",
     "build:dash": "cd dash && bun install && bun run build",
-    "release": "bun run ts && bun run build:dash && bun publish --access public"
+    "release": "npm version patch --no-git-tag-version && bun run ts && bun run build:dash && bun publish --access public"
   },
   "dependencies": {
     "arctic": "^3.7.0",

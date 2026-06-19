@@ -21,6 +21,8 @@ type Parsed = {
   provider?: string;
   planType?: string | null;
   cumulative?: Cumulative;
+  /** Timestamp of the latest token_count event — used to stamp the tracked delta at usage time. */
+  cumulativeAt?: Date;
   rateLimits?: { fiveHourPct?: number; sevenDayPct?: number; planType?: string | null };
 };
 
@@ -124,7 +126,7 @@ function parseSession(text: string): Parsed {
   const parsed: Parsed = {};
   for (const line of text.split("\n")) {
     if (!line) continue;
-    let obj: { type?: string; payload?: Record<string, unknown> };
+    let obj: { type?: string; timestamp?: string; payload?: Record<string, unknown> };
     try {
       obj = JSON.parse(line);
     } catch {
@@ -146,6 +148,8 @@ function parseSession(text: string): Parsed {
           output: Number(info.output_tokens ?? 0),
           reasoning: Number(info.reasoning_output_tokens ?? 0)
         };
+        const at = obj.timestamp ? new Date(obj.timestamp) : null;
+        if (at && !Number.isNaN(at.getTime())) parsed.cumulativeAt = at;
       }
       const rl = p.rate_limits as {
         primary?: { used_percent?: number };
@@ -303,10 +307,13 @@ export async function processCodexSessions(client: AutumnClient, auth: SummerAut
       const provider = parsed.provider || "openai";
       const billingMode: BillingMode = parsed.planType ? "subscription" : "api";
       try {
-        const res = await client.trackTokens({
+        // Stamp at the latest token_count time so the delta lands on the day it happened (not poll
+        // time) — keeps Codex live day-bucketing consistent with backfill across midnight/poll lag.
+        const res = await client.trackTokensAt({
           customerId,
           featureId: USAGE_FEATURE,
           modelId: `${provider}/${parsed.model}`,
+          timestamp: parsed.cumulativeAt ? parsed.cumulativeAt.getTime() : Date.now(),
           inputTokens: nonCachedInput,
           outputTokens: dOutput,
           cacheReadTokens: dCached,
@@ -382,7 +389,8 @@ export async function processCodexSessions(client: AutumnClient, auth: SummerAut
     ...fresh,
     codexSessions: tracked,
     codexUsage: codexUsage ?? fresh.codexUsage,
-    // Mark when live tracking first recorded usage, so `backfill` auto-caps here (no overlap).
+    // Informational: when live tracking first recorded usage. (Backfill no longer caps on this —
+    // it fills gaps per (harness, model, bucket) the daemon didn't cover. See runBackfill.)
     liveTrackingSince: fresh.liveTrackingSince ?? (trackedTokensThisPoll ? Date.now() : undefined),
     totals: {
       ...prevTotals,

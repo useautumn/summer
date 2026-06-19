@@ -1,5 +1,5 @@
 import type { BillingMode, SummerUsageEvent } from "../../domain/types.ts";
-import { logRecordAttributes, numberAttr, stringAttr, visitLogRecords } from "../../telemetry/otlp.ts";
+import { logRecordAttributes, numberAttr, otelTimestampMs, stringAttr, visitLogRecords } from "../../telemetry/otlp.ts";
 
 function inferBillingMode(attrs: Record<string, unknown>): BillingMode {
   const authMode = stringAttr(attrs, "auth_mode", "auth.mode", "codex.auth_mode");
@@ -54,6 +54,7 @@ export function parseCodexUsageEvents(payload: unknown): SummerUsageEvent[] {
       requestId: stringAttr(attrs, "request_id", "response.id", "gen_ai.response.id"),
       sessionId: stringAttr(attrs, "session.id", "session_id", "conversation.id"),
       source: stringAttr(attrs, "event.name", "event_name"),
+      timestampMs: otelTimestampMs(attrs),
       raw: attrs
     });
   }

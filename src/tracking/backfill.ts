@@ -5,10 +5,11 @@ import { readState, writeState } from "../config/storage.ts";
 import type { BillingMode, SummerAuth, UsageHarness } from "../domain/types.ts";
 import { readClaudeUsageRecords } from "../integrations/claude/transcripts.ts";
 import { listCodexSessionFiles, parseSessionTimeline } from "../integrations/codex/sessions.ts";
+import { gatherOpencodeRecords } from "../integrations/opencode/sessions.ts";
 import { log, serializeError } from "../logging/logger.ts";
 
 export type Granularity = "daily" | "hourly";
-export type HarnessSelector = "claude" | "codex" | "all";
+export type HarnessSelector = "claude" | "codex" | "opencode" | "all";
 
 export type BackfillOptions = {
   since?: Date;
@@ -23,11 +24,13 @@ export type BackfillOptions = {
   idempotencySalt?: string;
 };
 
-/** A normalised per-event usage record from either harness. `inputTokens` excludes cache. */
+/** A normalised per-event usage record from any harness. `inputTokens` excludes cache. */
 type UsageRecord = {
   at: Date;
   harness: UsageHarness;
   model: string;
+  /** Explicit Models.dev provider (opencode is multi-provider); else derived from harness. */
+  provider?: string;
   billingMode: BillingMode;
   inputTokens: number;
   outputTokens: number;
@@ -39,6 +42,7 @@ type UsageRecord = {
 export type BackfillBucket = {
   harness: UsageHarness;
   model: string;
+  provider?: string;
   billingMode: BillingMode;
   bucketMs: number;
   label: string;
@@ -62,8 +66,20 @@ export type BackfillResult = {
   byHarness: Record<string, { buckets: number; inputTokens: number; outputTokens: number; usd: number }>;
 };
 
+/** Was a track call rejected because the model isn't in Models.dev pricing data (Autumn 400)? */
+function isUnpriceableModel(error: unknown): boolean {
+  const err = error as { statusCode?: number; status?: number; body?: string; message?: string };
+  const text = `${err?.body ?? ""} ${err?.message ?? ""}`;
+  return (err?.statusCode === 400 || err?.status === 400) && /not found in models\.dev/i.test(text);
+}
+
 const wantClaude = (h: HarnessSelector) => h === "all" || h === "claude";
 const wantCodex = (h: HarnessSelector) => h === "all" || h === "codex";
+const wantOpencode = (h: HarnessSelector) => h === "all" || h === "opencode";
+
+/** Models.dev model id for a bucket. opencode supplies its own provider; others derive from harness. */
+const modelIdOf = (b: { harness: UsageHarness; model: string; provider?: string }) =>
+  b.provider ? `${b.provider}/${b.model}` : toModelId(b.harness, b.model);
 
 /** Floor an instant to the start of its UTC day/hour (matches how live events + the dash bucket). */
 function floorBucket(at: Date, g: Granularity): number {
@@ -73,21 +89,27 @@ function floorBucket(at: Date, g: Granularity): number {
   return Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate());
 }
 
-/** Identity of a backfill event/bucket — must match between candidate buckets and stored events. */
+// Identity of a backfill bucket. We stamp it onto each event's `properties.backfill_key` so re-run
+// matching is exact and independent of how Autumn stores `properties.model` (it canonicalises known
+// models to the priced id, but may leave unknown models raw — which would otherwise break dedup).
+const bucketKey = (b: BackfillBucket) =>
+  `${b.harness}:${modelIdOf(b)}:${b.billingMode}:${b.label}`;
+
+/** Recover a stored backfill event's bucket identity: prefer the self-contained key we wrote, else
+ * reconstruct from properties (Autumn canonicalises `model` to the priced id, matching `bucketKey`). */
 const backfillEventKey = (p: Record<string, unknown>): string | undefined => {
+  if (typeof p.backfill_key === "string") return p.backfill_key;
   const bucket = p.bucket as string | undefined;
   if (!bucket) return undefined;
   return `${p.harness}:${p.model}:${p.billing_mode}:${bucket}`;
 };
-// Autumn canonicalises stored `properties.model` to the priced model_id (e.g. "openai/gpt-5.5"),
-// so the candidate key must use the same form to match `backfillEventKey` on re-runs.
-const bucketKey = (b: BackfillBucket) =>
-  `${b.harness}:${toModelId(b.harness, b.model)}:${b.billingMode}:${b.label}`;
 
-/** Live coverage key — a (harness, bucket) the live daemon already recorded. Matches `liveBucketKey`. */
-const liveBucketKeyFromEvent = (harness: string, timestampMs: number, g: Granularity) =>
-  `${harness}:${floorBucket(new Date(timestampMs), g)}`;
-const liveBucketKey = (b: BackfillBucket) => `${b.harness}:${b.bucketMs}`;
+/** Live-coverage key — a (harness, model, bucket) the live daemon already recorded. Per-model so a
+ * day where the daemon saw one model doesn't suppress backfill of a different model that day. */
+const liveBucketKeyFromEvent = (harness: string, model: string, timestampMs: number, g: Granularity) =>
+  `${harness}:${model}:${floorBucket(new Date(timestampMs), g)}`;
+const liveBucketKey = (b: BackfillBucket) =>
+  `${b.harness}:${modelIdOf(b)}:${b.bucketMs}`;
 
 /**
  * Single source of truth, in ONE paged pass over THIS org's events.list (no per-bucket lookups):
@@ -106,7 +128,8 @@ async function scanExistingEvents(
   const backfillKeys = new Set<string>();
   const liveBucketKeys = new Set<string>();
   const PAGE = 1000;
-  const MAX = 50_000;
+  const MAX = 500_000;
+  let complete = false;
   try {
     for (let offset = 0; offset < MAX; offset += PAGE) {
       const ev = await client.listEvents({ customerId, featureId: USAGE_FEATURE, limit: PAGE, offset });
@@ -116,14 +139,23 @@ async function scanExistingEvents(
         if (props.source === "backfill") {
           const key = backfillEventKey(props);
           if (key) backfillKeys.add(key);
-        } else if (typeof e.timestamp === "number" && typeof props.harness === "string") {
-          liveBucketKeys.add(liveBucketKeyFromEvent(props.harness, e.timestamp, granularity));
+        } else if (typeof e.timestamp === "number" && typeof props.harness === "string" && typeof props.model === "string") {
+          liveBucketKeys.add(liveBucketKeyFromEvent(props.harness, props.model, e.timestamp, granularity));
         }
       }
-      if (list.length < PAGE) break;
+      if (list.length < PAGE) {
+        complete = true;
+        break;
+      }
     }
   } catch (error) {
     log.debug({ action: "backfill_scan_events_failed", error: serializeError(error) });
+    return { backfillKeys, liveBucketKeys };
+  }
+  // If we stopped at MAX while still getting full pages, coverage is incomplete — backfill could
+  // then re-send (idempotency dedups backfill-vs-backfill) or double-count vs live beyond the window.
+  if (!complete) {
+    log.warn({ action: "backfill_scan_truncated", scannedEvents: MAX });
   }
   return { backfillKeys, liveBucketKeys };
 }
@@ -191,17 +223,34 @@ async function gatherCodex(opts: { since?: Date; until?: Date }): Promise<UsageR
   return out;
 }
 
+async function gatherOpencode(opts: { since?: Date; until?: Date }): Promise<UsageRecord[]> {
+  const messages = await gatherOpencodeRecords({ since: opts.since, until: opts.until });
+  return messages.map((m) => ({
+    at: new Date(m.createdMs),
+    harness: "opencode" as const,
+    model: m.modelID,
+    provider: m.providerID,
+    billingMode: "api" as const,
+    inputTokens: m.tokens.input,
+    outputTokens: m.tokens.output,
+    cacheReadTokens: m.tokens.cacheRead,
+    cacheWriteTokens: m.tokens.cacheWrite,
+    reasoningTokens: m.tokens.reasoning
+  }));
+}
+
 function bucketize(records: UsageRecord[], g: Granularity): BackfillBucket[] {
   const map = new Map<string, BackfillBucket>();
   for (const r of records) {
     const bucketMs = floorBucket(r.at, g);
     const label = new Date(bucketMs).toISOString();
-    const key = `${r.harness}|${r.model}|${r.billingMode}|${label}`;
+    const key = `${r.harness}|${r.provider ?? ""}|${r.model}|${r.billingMode}|${label}`;
     let b = map.get(key);
     if (!b) {
       b = {
         harness: r.harness,
         model: r.model,
+        provider: r.provider,
         billingMode: r.billingMode,
         bucketMs,
         label,
@@ -239,11 +288,12 @@ async function runPool<T>(items: T[], worker: (item: T) => Promise<void>, concur
 }
 
 /**
- * Import historical Claude Code + Codex usage into Autumn as backdated, daily/hourly-aggregated
- * `usage_in_usd` events. State lives in Autumn, not locally: a single `events.list` scan gives both
- * the auto-cap (oldest live event → no overlap with the daemon) and which buckets are already
- * imported (→ fast re-runs). This self-corrects across an org recreation. Per-bucket idempotency
- * keys are the final safety net. Never touches `state.totals` (the live "since" lens).
+ * Import historical Claude Code, Codex + opencode usage into Autumn as backdated, daily/hourly-aggregated
+ * `usage_in_usd` events. State lives in Autumn, not locally: a single `events.list` scan tells us
+ * which buckets we've already backfilled AND which (harness, model, bucket) the live daemon already
+ * covers — so re-runs fill only the GAPS the daemon missed and never double-count live usage. This
+ * self-corrects across an org recreation. Per-bucket idempotency keys are the final safety net.
+ * Never touches `state.totals` (the live "since" lens).
  */
 export async function runBackfill(
   client: AutumnClient,
@@ -281,6 +331,9 @@ export async function runBackfill(
   if (wantCodex(opts.harness)) {
     records.push(...(await gatherCodex({ since, until })));
   }
+  if (wantOpencode(opts.harness)) {
+    records.push(...(await gatherOpencode({ since, until })));
+  }
 
   const buckets = bucketize(records, opts.granularity);
 
@@ -310,14 +363,16 @@ export async function runBackfill(
   for (const b of buckets) {
     bump(b.harness, { buckets: 1, inputTokens: b.inputTokens, outputTokens: b.outputTokens });
   }
-  if (opts.dryRun) return result;
 
   // Skip buckets we've already backfilled (backfillKeys) AND buckets the live daemon already covered
-  // (liveBucketKeys) — so re-runs fill only the gaps, never double-count live usage. `--force` ignores both.
+  // (liveBucketKeys) — so re-runs fill only the gaps, never double-count live usage. `--force` ignores
+  // both. Computed BEFORE the dry-run return so `--dry-run` reflects what would actually send.
   const toSend = opts.force
     ? buckets
     : buckets.filter((b) => !backfillKeys.has(bucketKey(b)) && !liveBucketKeys.has(liveBucketKey(b)));
   result.skipped = buckets.length - toSend.length;
+
+  if (opts.dryRun) return result;
 
   // Build a track-tokens body per gap bucket. Each carries its own idempotency key, so Autumn dedups
   // per-event server-side and re-runs are safe. `async: true` → enqueued (202), priced later, so the
@@ -327,7 +382,7 @@ export async function runBackfill(
     return {
       customerId,
       featureId: USAGE_FEATURE,
-      modelId: toModelId(b.harness, b.model),
+      modelId: modelIdOf(b),
       timestamp: b.bucketMs,
       inputTokens: b.inputTokens,
       outputTokens: b.outputTokens,
@@ -338,8 +393,11 @@ export async function runBackfill(
         harness: b.harness,
         billing_mode: b.billingMode,
         model: b.model,
+        ...(b.provider ? { provider: b.provider } : {}),
         source: "backfill",
         bucket: b.label,
+        // Self-contained dedup identity (survives Autumn's model canonicalisation; see backfillEventKey).
+        backfill_key: bucketKey(b),
         user_email: auth.user?.email
       },
       idempotencyKey: opts.idempotencySalt ? `${idempotencyBase}:${opts.idempotencySalt}` : idempotencyBase,
@@ -360,8 +418,23 @@ export async function runBackfill(
       await client.batchTrackTokensAt(batch.map(toBody));
       result.sent += batch.length;
     } catch (error) {
-      log.warn({ action: "backfill_batch_failed", error: serializeError(error), buckets: batch.length });
-      failures.push(...batch);
+      // batch_track_tokens is all-or-nothing and 400s the WHOLE batch if any model isn't in
+      // Models.dev. Retry per bucket so one unpriceable model (e.g. OpenCode Zen) doesn't drop
+      // every other bucket; tolerate per-bucket unpriceable-model 400s as skips.
+      log.debug({ action: "backfill_batch_failed_splitting", error: serializeError(error), buckets: batch.length });
+      for (const b of batch) {
+        try {
+          await client.batchTrackTokensAt([toBody(b)]);
+          result.sent += 1;
+        } catch (single) {
+          if (isUnpriceableModel(single)) {
+            result.skipped += 1;
+            log.debug({ action: "backfill_skip_unpriceable", model: modelIdOf(b) });
+          } else {
+            failures.push(b);
+          }
+        }
+      }
     }
   };
   await runPool(batches, sendBatch, BACKFILL_CONCURRENCY);

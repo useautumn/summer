@@ -337,21 +337,23 @@ function printBackfill(res: BackfillResult) {
   console.log(`Granularity:  ${res.granularity}`);
   console.log(line);
 
-  // Per-day rollup (UTC) so you can eyeball the shape before/after sending.
-  const byDay = new Map<string, { claude: number; codex: number }>();
+  // Per-day rollup (UTC) so you can eyeball the shape before/after sending. One column per harness
+  // present in the result, so new harnesses (opencode, …) show up without hardcoding.
+  const harnesses = [...new Set(res.buckets.map((b) => b.harness))].sort();
+  const byDay = new Map<string, Record<string, number>>();
   for (const b of res.buckets) {
     const day = b.label.slice(0, 10);
-    const row = byDay.get(day) ?? { claude: 0, codex: 0 };
-    const tok = b.inputTokens + b.outputTokens;
-    if (b.harness === "codex") row.codex += tok;
-    else row.claude += tok;
+    const row = byDay.get(day) ?? {};
+    row[b.harness] = (row[b.harness] ?? 0) + b.inputTokens + b.outputTokens;
     byDay.set(day, row);
   }
   if (byDay.size > 0) {
-    console.log(`${"Day".padEnd(12)}${"Claude tok".padStart(14)}${"Codex tok".padStart(14)}`);
+    const header = harnesses.map((h) => `${h} tok`.padStart(16)).join("");
+    console.log(`${"Day".padEnd(12)}${header}`);
     for (const day of [...byDay.keys()].sort()) {
       const r = byDay.get(day)!;
-      console.log(`${day.padEnd(12)}${r.claude.toLocaleString().padStart(14)}${r.codex.toLocaleString().padStart(14)}`);
+      const cols = harnesses.map((h) => (r[h] ?? 0).toLocaleString().padStart(16)).join("");
+      console.log(`${day.padEnd(12)}${cols}`);
     }
     console.log(line);
   }
@@ -364,7 +366,12 @@ function printBackfill(res: BackfillResult) {
   }
   console.log(line);
   if (res.dryRun) {
-    console.log(`${res.buckets.length} buckets would be sent. Re-run without --dry-run to import.`);
+    const wouldSend = res.buckets.length - res.skipped;
+    console.log(
+      `${wouldSend} bucket(s) would be sent` +
+        (res.skipped > 0 ? `, ${res.skipped} skipped (already imported / live-covered)` : "") +
+        ". Re-run without --dry-run to import."
+    );
   } else {
     // Backfill sends async, so Autumn prices the events shortly — `value` isn't in the response.
     const usdPart = res.usd > 0 ? `   Total: $${res.usd.toFixed(4)}` : "   (values pricing in Autumn…)";
@@ -378,11 +385,11 @@ function printBackfill(res: BackfillResult) {
 
 program
   .command("backfill")
-  .description("Import historical Claude Code + Codex usage into Autumn (backdated, aggregated).")
+  .description("Import historical Claude Code, Codex + opencode usage into Autumn (backdated, aggregated).")
   .option("--since <date>", "Only backfill usage on/after this date (e.g. 2026-05-01)")
   .option("--until <date>", "Only backfill usage before this date (default: auto-cap at first live event)")
   .option("--granularity <granularity>", "Aggregation bucket: daily | hourly", "daily")
-  .option("--harness <harness>", "Which harness: claude | codex | all", "all")
+  .option("--harness <harness>", "Which harness: claude | codex | opencode | all", "all")
   .option("--billing-mode <mode>", "Claude billing mode (transcripts don't record it): subscription | api", "subscription")
   .option("--dry-run", "Show what would be sent without sending anything")
   .option("--force", "Re-send buckets even if already present in Autumn (idempotency still dedups)")
@@ -406,7 +413,9 @@ program
       };
       const granularity: Granularity = opts.granularity === "hourly" ? "hourly" : "daily";
       const harness: HarnessSelector =
-        opts.harness === "claude" || opts.harness === "codex" ? opts.harness : "all";
+        opts.harness === "claude" || opts.harness === "codex" || opts.harness === "opencode"
+          ? opts.harness
+          : "all";
       const billingMode: BillingMode = opts.billingMode === "api" ? "api" : "subscription";
       const since = parseDate(opts.since, "--since");
       const until = parseDate(opts.until, "--until");
@@ -414,7 +423,7 @@ program
       const auth = await ensureCustomer();
       const client = new AutumnClient(auth);
       console.log(
-        `Reading local ${harness === "all" ? "Claude Code + Codex" : harness} history…${opts.dryRun ? " (dry run)" : ""}`
+        `Reading local ${harness === "all" ? "Claude Code, Codex + opencode" : harness} history…${opts.dryRun ? " (dry run)" : ""}`
       );
       const res = await runBackfill(client, auth, {
         since,
@@ -497,7 +506,7 @@ async function maybeOfferBackfill(
   const state = await readState();
   if (state.backfillPromptedAt) return; // already asked once — use `summer backfill` to import later.
 
-  const doIt = await confirm("Import your existing Claude Code + Codex history now?", {
+  const doIt = await confirm("Import your existing Claude Code, Codex + opencode history now?", {
     default: opts.firstRun
   });
   await writeState({ ...(await readState()), backfillPromptedAt: new Date().toISOString() });
@@ -511,7 +520,7 @@ async function maybeOfferBackfill(
 
 program
   .command("start")
-  .description("Set up (if needed) and start Summer — configures Claude Code and Codex.")
+  .description("Set up (if needed) and start Summer — configures Claude Code, Codex + opencode.")
   .option("--debug", "Run in the foreground with debug logs.")
   .option("--yes", "Skip the org confirmation prompt.")
   .option("--switch-org", "Log in again to choose a different Autumn org before setup.")

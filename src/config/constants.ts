@@ -42,7 +42,10 @@ export const SUMMER_FEATURES: SummerFeatureDef[] = [
 
 export const HARNESS_PROVIDER: Record<UsageHarness, Provider> = {
   claude_code: "anthropic",
-  codex: "openai"
+  codex: "openai",
+  // opencode is multi-provider; it supplies its own `providerID` per message, so this fallback
+  // is only used if an opencode event somehow lacks a provider.
+  opencode: "anthropic"
 };
 
 export const toModelId = (harness: UsageHarness, model: string) =>

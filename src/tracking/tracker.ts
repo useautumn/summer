@@ -59,10 +59,13 @@ export async function trackUsageEvent(client: AutumnClient, auth: SummerAuth, ev
   // The idempotency key makes re-delivery a benign no-op (409 -> skip, no double-count).
   let trackedValueUsd = 0;
   try {
-    const res = await client.trackTokens({
+    // Stamp at the harness event's usage time (falling back to now) so the event lands on the day it
+    // happened — keeps live day-bucketing consistent with backfill (and avoids day-boundary overlap).
+    const res = await client.trackTokensAt({
       customerId,
       featureId: USAGE_FEATURE,
       modelId: toModelId(event.harness, event.model),
+      timestamp: event.timestampMs ?? Date.now(),
       inputTokens,
       outputTokens,
       cacheReadTokens,

@@ -29,10 +29,14 @@ function daemonArgv(): { bin: string; cli: string } {
   return { bin: process.execPath, cli: fileURLToPath(new URL("../cli.ts", import.meta.url)) };
 }
 
-/** Env the boot service should carry: the OTLP port + (in dev) the Autumn URL overrides. */
+/**
+ * Env the boot service must carry: the OTLP port + (in dev) the Autumn URL overrides AND `SUMMER_DIR`.
+ * `SUMMER_DIR` is critical — it selects the auth/state home dir. Omitting it made a dev install's
+ * autostart daemon read prod auth (~/.summer) while talking to the dev API → 401 on every track.
+ */
 function serviceEnv(port: number): Record<string, string> {
   const env: Record<string, string> = { SUMMER_OTLP_PORT: String(port) };
-  for (const key of ["SUMMER_AUTUMN_API_URL", "SUMMER_AUTUMN_APP_URL"]) {
+  for (const key of ["SUMMER_DIR", "SUMMER_AUTUMN_API_URL", "SUMMER_AUTUMN_APP_URL"]) {
     if (process.env[key]) env[key] = process.env[key] as string;
   }
   return env;

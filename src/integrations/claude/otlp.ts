@@ -1,5 +1,5 @@
 import type { BillingMode, SummerUsageEvent } from "../../domain/types.ts";
-import { logRecordAttributes, numberAttr, stringAttr, visitLogRecords } from "../../telemetry/otlp.ts";
+import { logRecordAttributes, numberAttr, otelTimestampMs, stringAttr, visitLogRecords } from "../../telemetry/otlp.ts";
 
 /**
  * Classify a Claude Code request as subscription vs api.
@@ -50,6 +50,7 @@ export function parseClaudeUsageEvents(
       requestId: stringAttr(attrs, "request_id"),
       sessionId: stringAttr(attrs, "session.id") ?? stringAttr(attrs, "session_id"),
       source: stringAttr(attrs, "query_source"),
+      timestampMs: otelTimestampMs(attrs),
       raw: attrs
     });
   }

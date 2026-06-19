@@ -1,7 +1,7 @@
 import type { AutumnClient } from "../clients/autumn.ts";
 
 /** Property keys we surface as facets (filterable / groupable dimensions). */
-export const FACET_KEYS = ["harness", "model", "billing_mode", "user_email", "source"] as const;
+export const FACET_KEYS = ["harness", "model", "provider", "billing_mode", "user_email", "source"] as const;
 
 const USAGE_FEATURE = "usage_in_usd";
 const DAY_MS = 86_400_000;

@@ -1,9 +1,45 @@
+import { mkdir, rm, stat } from "node:fs/promises";
+import { join } from "node:path";
 import { Autumn } from "autumn-js";
 import type { CreateFeatureParams, UpdateFeatureParams } from "autumn-js";
 import { DEFAULT_AUTUMN_API_URL } from "../config/constants.ts";
-import { readAuth } from "../config/storage.ts";
+import { readAuth, summerHome } from "../config/storage.ts";
 import type { SummerAuth, SummerUser } from "../domain/types.ts";
 import { log } from "../logging/logger.ts";
+
+// Cross-process mutex (atomic mkdir) so the daemon + dash — which share one rotating, single-use
+// refresh token on disk — never refresh at the same time and invalidate each other (invalid_grant).
+const REFRESH_LOCK_TTL_MS = 20_000;
+const refreshLockPath = () => join(summerHome(), "refresh.lock");
+
+async function acquireRefreshLock(timeoutMs = 5000): Promise<boolean> {
+  const path = refreshLockPath();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      await mkdir(path, { recursive: true }); // atomic across processes: throws EEXIST if already held
+      return true;
+    } catch (error) {
+      // EEXIST = held by someone; steal it if it's stale (crashed holder). Any other error (e.g. a
+      // transient FS issue) just falls through to the deadline-bounded retry below.
+      if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+        try {
+          if (Date.now() - (await stat(path)).mtimeMs > REFRESH_LOCK_TTL_MS) {
+            await rm(path, { recursive: true, force: true });
+          }
+        } catch {
+          // lock vanished between mkdir and stat — fall through and retry
+        }
+      }
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+}
+
+async function releaseRefreshLock(): Promise<void> {
+  await rm(refreshLockPath(), { recursive: true, force: true }).catch(() => {});
+}
 
 export type AutumnFeature = {
   id: string;
@@ -112,31 +148,50 @@ export class AutumnClient {
   }
 
   /**
-   * Get a fresh access token. Refresh tokens rotate and are single-use, so with multiple
-   * processes (daemon + dash) our in-memory refresh token can already be spent. We therefore
-   * (1) re-read auth.json first — another process may have just minted a token we can adopt;
-   * (2) otherwise refresh using the freshest refresh token on disk; (3) if that loses the
-   * rotation race, re-read once more and adopt the winner's token.
+   * Get a fresh access token, using SINGLE-FLIGHT refresh across processes. Refresh tokens rotate and
+   * are single-use, so the daemon + dash sharing one auth.json must not refresh at once (they'd
+   * invalidate each other → `invalid_grant`). Strategy:
+   *   1. Fast path: a fresher token may already be on disk (another process refreshed) — adopt it.
+   *   2. Acquire a cross-process lock, then re-read disk (the lock holder likely just wrote a fresh
+   *      token we can adopt without refreshing at all).
+   *   3. Only the lock holder performs the actual refresh; the rotated token is persisted by
+   *      `refreshAuth`, so everyone else adopts it in step 1/2 next time.
    */
   private async refreshToken(): Promise<boolean> {
     const stored = await readAuth();
-    // Capture the freshest refresh token (and base auth) before any type narrowing.
-    const refreshToken = stored?.refreshToken ?? this.auth.refreshToken;
-    const base: SummerAuth = stored ?? this.auth;
-
     if (this.isUsable(stored)) {
       this.adopt(stored);
       log.debug({ action: "autumn_token_adopted" });
       return true;
     }
-    if (!refreshToken) return false;
 
+    const locked = await acquireRefreshLock();
     try {
+      // Re-check after acquiring — whoever held the lock most likely just refreshed.
+      const fresh = await readAuth();
+      // Capture the freshest refresh token (and base auth) before the type guard narrows `fresh`.
+      const refreshToken = fresh?.refreshToken ?? this.auth.refreshToken;
+      const base: SummerAuth = fresh ?? this.auth;
+      if (this.isUsable(fresh)) {
+        this.adopt(fresh);
+        log.debug({ action: "autumn_token_adopted" });
+        return true;
+      }
+
+      if (!refreshToken) return false;
+      // Lost the lock race and no fresh token appeared — back off rather than rotate concurrently.
+      // The caller surfaces the original error; the next poll re-reads and adopts the winner's token.
+      if (!locked) {
+        log.debug({ action: "autumn_token_refresh_contended" });
+        return false;
+      }
+
       const next = await refreshSharedAuth({ ...base, refreshToken });
       this.adopt(next);
       log.debug({ action: "autumn_token_refreshed" });
       return true;
     } catch (error) {
+      // Rotation race we still lost (e.g. another machine) — adopt whatever's on disk now.
       const after = await readAuth();
       if (this.isUsable(after)) {
         this.adopt(after);
@@ -145,6 +200,8 @@ export class AutumnClient {
       }
       log.warn({ action: "autumn_token_refresh_failed", error: (error as Error)?.message });
       return false;
+    } finally {
+      if (locked) await releaseRefreshLock();
     }
   }
 
