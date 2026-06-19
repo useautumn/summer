@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { getOAuthDebugConfig, login, requireAuth } from "../auth/oauth.ts";
 import { AutumnClient } from "../clients/autumn.ts";
-import { LOCALHOST, OTLP_PORT, getOtlpPort } from "../config/constants.ts";
+import { LOCALHOST, OTLP_PORT, SUMMER_FEATURES, getOtlpPort } from "../config/constants.ts";
 import { fetchClaudeUsage } from "../clients/claudeOauthUsage.ts";
 import open from "open";
 import { serveDash } from "../dash/server.ts";
@@ -60,8 +60,22 @@ async function ensureSetup(opts: { yes?: boolean; switchOrg?: boolean } = {}): P
     if (!auth.user?.id) throw new Error("Summer auth is missing user.id");
 
     const state = await readState();
-    const confirmed = Boolean(state.setup?.orgId && state.setup.orgId === auth.org?.id);
+    const localConfirmed = Boolean(state.setup?.orgId && state.setup.orgId === auth.org?.id);
     const client = new AutumnClient(auth);
+
+    // The org is already set up if Autumn has Summer's features — skip the prompt even on a
+    // fresh machine with no local marker. (`firstRun` still tracks the local marker so we can
+    // offer to backfill this machine's history.)
+    let orgHasFeatures = false;
+    if (!localConfirmed) {
+      try {
+        const have = new Set((await client.listFeatures()).list.map((f) => f.id));
+        orgHasFeatures = SUMMER_FEATURES.every((f) => have.has(f.id));
+      } catch (error) {
+        log.debug({ action: "feature_check_failed", error: serializeError(error) });
+      }
+    }
+    const confirmed = localConfirmed || orgHasFeatures;
 
     console.log();
     console.log(bold("Autumn org"));
@@ -89,13 +103,15 @@ async function ensureSetup(opts: { yes?: boolean; switchOrg?: boolean } = {}): P
     // Confirmed already, or just confirmed/`--yes`/non-interactive: seed (idempotent) + remember.
     await setupSummerFeatures(client);
     await client.getOrCreateCustomer(auth.user);
-    if (!confirmed) {
+    if (!localConfirmed) {
       await writeState({
         ...(await readState()),
         setup: { orgId: auth.org?.id ?? "", confirmedAt: new Date().toISOString() }
       });
     }
-    return { auth, firstRun: !confirmed };
+    // First run on THIS machine (no local marker) — lets the caller offer a backfill even
+    // when the org was already set up elsewhere.
+    return { auth, firstRun: !localConfirmed };
   }
 }
 
@@ -109,9 +125,21 @@ async function canBindPort(port: number) {
   });
 }
 
+async function daemonHealthy(port: number): Promise<boolean> {
+  try {
+    const response = await fetch(`http://${LOCALHOST}:${port}/health`);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 async function resolveAvailableOtlpPort() {
   const requested = getOtlpPort();
   if (await canBindPort(requested)) return requested;
+
+  // Busy — but if it's our own daemon already on this port, reuse it (idempotent `start`).
+  if (await daemonHealthy(requested)) return requested;
 
   if (process.env.SUMMER_OTLP_PORT) {
     throw new Error(`SUMMER_OTLP_PORT ${requested} is already in use.`);
@@ -133,16 +161,12 @@ async function resolveAvailableOtlpPort() {
 
 async function getRunningDaemon() {
   const state = await readState();
-  const pid = state.daemon?.pid;
-  if (!pid) return null;
+  // The autostart service (launchd/systemd) owns the daemon, so its pid isn't tracked here;
+  // detect a running daemon by health-checking the known port rather than relying on a pid.
+  const port = state.daemon?.port ?? state.service?.port;
+  if (!port) return null;
 
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return null;
-  }
-
-  const port = state.daemon?.port ?? getOtlpPort();
+  const pid = state.daemon?.pid ?? 0;
   try {
     const response = await fetch(`http://${LOCALHOST}:${port}/health`);
     if (!response.ok) return null;
@@ -535,6 +559,17 @@ program
       // detached process when autostart is unsupported or opted out.
       const useService = options.service !== false && serviceKind() !== null;
       if (useService) {
+        // Idempotent: if the autostart service is already installed and healthy, leave it be.
+        const status = await serviceStatus(port);
+        if (status.installed && status.running) {
+          await writeState({
+            ...(await readState()),
+            service: { kind: status.kind!, port, installedAt: new Date().toISOString() },
+            daemon: { pid: 0, port, startedAt: new Date().toISOString() }
+          });
+          printStartSummary(auth, port, { autostart: status.kind });
+          return;
+        }
         await stopDaemon().catch(() => undefined); // hand the port to the service
         let kind: ServiceKind | null = null;
         try {

@@ -40,6 +40,19 @@ export function label(value: string): string {
   return value;
 }
 
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
+];
+
+/** Absolute local date + time, e.g. "12 June 14:30". */
+export function dateTime(ms: number): string {
+  const d = new Date(ms);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${hh}:${mm}`;
+}
+
 const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 const UNITS: Array<[Intl.RelativeTimeFormatUnit, number]> = [
   ["day", 86_400_000],

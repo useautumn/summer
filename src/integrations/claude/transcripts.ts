@@ -2,7 +2,18 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
+/**
+ * All Claude data roots to scan, matching ccusage: honor `CLAUDE_CONFIG_DIR` (comma-separated) if set,
+ * otherwise default to BOTH `~/.config/claude` and `~/.claude` (newer Claude Code moved to the former).
+ * Dedup by (message.id, requestId) across roots makes overlapping dirs safe.
+ */
+function claudeProjectDirs(): string[] {
+  const configured = process.env.CLAUDE_CONFIG_DIR?.trim();
+  const roots = configured
+    ? configured.split(",").map((p) => p.trim()).filter(Boolean)
+    : [join(homedir(), ".config", "claude"), join(homedir(), ".claude")];
+  return roots.map((root) => join(root, "projects"));
+}
 
 /** One assistant turn's token usage, parsed from a Claude Code transcript line. */
 export type ClaudeUsageRecord = {
@@ -113,7 +124,8 @@ export async function readClaudeUsageRecords(opts: {
   since?: Date;
   until?: Date;
 } = {}): Promise<ClaudeUsageRecord[]> {
-  const files = await listTranscriptFiles(CLAUDE_PROJECTS_DIR);
+  const dirs = claudeProjectDirs();
+  const files = (await Promise.all(dirs.map(listTranscriptFiles))).flat();
   const seen = new Set<string>();
   const records: ClaudeUsageRecord[] = [];
   const sinceMs = opts.since?.getTime();

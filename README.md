@@ -71,3 +71,23 @@ Each developer is an Autumn customer. Token usage is captured locally via OpenTe
 [Models.dev](https://models.dev), and recorded as **`usage_in_usd`** with properties like
 `harness`, `model`, `user_email`, and `billing_mode` (`subscription` = value covered by
 your plan, `api` = real pay-per-token spend).
+
+## Pricing & accuracy
+
+Token **counts** are captured exactly (they match `ccusage` to within rounding on both
+harnesses). The **dollar** figures use Models.dev's **standard-tier** rates, with one
+deliberate simplification worth knowing:
+
+- **Priority / "fast" service tier is not surcharged.** If you run Codex with
+  `service_tier = "fast"` (or Claude Code in fast mode), the provider bills a premium —
+  Models.dev lists it at ~**2.5×** standard for `gpt-5.5`, for example. Summer sends raw
+  token counts and Autumn prices them at the **standard** rate, so it does **not** apply
+  that premium. Tools like `ccusage` detect the tier and multiply, so their totals can run
+  meaningfully higher (≈25% on heavy priority-tier Codex). Summer's number is best read as
+  **standard-rate spend**, not a priority-tier invoice.
+- Autumn applies Models.dev's >200k-context tier to each daily aggregate, which can slightly
+  over-price a day made up of small (<200k-token) requests.
+
+Both are pricing-method differences, not capture errors. Modeling the priority tier
+accurately would mean pricing client-side (the path `ccusage` takes) rather than relying on
+Autumn's per-token pricing.

@@ -6,7 +6,6 @@ import type { BillingMode, SummerAuth, UsageHarness } from "../domain/types.ts";
 import { readClaudeUsageRecords } from "../integrations/claude/transcripts.ts";
 import { listCodexSessionFiles, parseSessionTimeline } from "../integrations/codex/sessions.ts";
 import { log, serializeError } from "../logging/logger.ts";
-import { isDuplicateIdempotency } from "./tracker.ts";
 
 export type Granularity = "daily" | "hourly";
 export type HarnessSelector = "claude" | "codex" | "all";
@@ -85,20 +84,27 @@ const backfillEventKey = (p: Record<string, unknown>): string | undefined => {
 const bucketKey = (b: BackfillBucket) =>
   `${b.harness}:${toModelId(b.harness, b.model)}:${b.billingMode}:${b.label}`;
 
+/** Live coverage key — a (harness, bucket) the live daemon already recorded. Matches `liveBucketKey`. */
+const liveBucketKeyFromEvent = (harness: string, timestampMs: number, g: Granularity) =>
+  `${harness}:${floorBucket(new Date(timestampMs), g)}`;
+const liveBucketKey = (b: BackfillBucket) => `${b.harness}:${b.bucketMs}`;
+
 /**
- * Single source of truth: page through THIS org's events.list once and derive both
- *  (a) `earliestLiveMs` — the oldest non-backfill event, so backfill auto-caps there and never
- *      overlaps the live daemon, and
- *  (b) `backfillKeys` — bucket identities already imported, so re-runs skip them.
+ * Single source of truth, in ONE paged pass over THIS org's events.list (no per-bucket lookups):
+ *  (a) `backfillKeys` — bucket identities already imported by backfill, so re-runs skip them, and
+ *  (b) `liveBucketKeys` — (harness, bucket) the live daemon already covered, so backfill fills only
+ *      the GAPS the daemon missed (instead of hard-capping at the oldest live event, which dropped
+ *      everything after a brief live session). Idempotency keys remain the final safety net.
  * Because it reads Autumn (not local state), it self-corrects across an org recreation: a fresh org
- * returns nothing → everything re-sends. (Autumn idempotency is still the final safety net.)
+ * returns nothing → everything re-sends.
  */
 async function scanExistingEvents(
   client: AutumnClient,
-  customerId: string
-): Promise<{ earliestLiveMs?: number; backfillKeys: Set<string> }> {
+  customerId: string,
+  granularity: Granularity
+): Promise<{ backfillKeys: Set<string>; liveBucketKeys: Set<string> }> {
   const backfillKeys = new Set<string>();
-  let earliestLiveMs: number | undefined;
+  const liveBucketKeys = new Set<string>();
   const PAGE = 1000;
   const MAX = 50_000;
   try {
@@ -110,8 +116,8 @@ async function scanExistingEvents(
         if (props.source === "backfill") {
           const key = backfillEventKey(props);
           if (key) backfillKeys.add(key);
-        } else if (typeof e.timestamp === "number") {
-          if (earliestLiveMs === undefined || e.timestamp < earliestLiveMs) earliestLiveMs = e.timestamp;
+        } else if (typeof e.timestamp === "number" && typeof props.harness === "string") {
+          liveBucketKeys.add(liveBucketKeyFromEvent(props.harness, e.timestamp, granularity));
         }
       }
       if (list.length < PAGE) break;
@@ -119,7 +125,7 @@ async function scanExistingEvents(
   } catch (error) {
     log.debug({ action: "backfill_scan_events_failed", error: serializeError(error) });
   }
-  return { earliestLiveMs, backfillKeys };
+  return { backfillKeys, liveBucketKeys };
 }
 
 async function gatherClaude(opts: { since?: Date; until?: Date; billingMode: BillingMode }): Promise<UsageRecord[]> {
@@ -218,6 +224,8 @@ function bucketize(records: UsageRecord[], g: Granularity): BackfillBucket[] {
 
 /** Max in-flight track_tokens requests during backfill — bounds load on Autumn. */
 const BACKFILL_CONCURRENCY = Math.max(1, Number(process.env.SUMMER_BACKFILL_CONCURRENCY ?? 2));
+// Autumn's /v1/balances.batch_track_tokens accepts up to 1000 events per call.
+const BACKFILL_BATCH_SIZE = Math.min(1000, Math.max(1, Number(process.env.SUMMER_BACKFILL_BATCH_SIZE ?? 1000)));
 
 /** Run `worker` over `items` with at most `concurrency` promises in flight. */
 async function runPool<T>(items: T[], worker: (item: T) => Promise<void>, concurrency: number): Promise<void> {
@@ -256,13 +264,14 @@ export async function runBackfill(
     }
   }
 
-  // One scan of THIS org's events = the source of truth (auto-cap + already-imported buckets).
-  const { earliestLiveMs, backfillKeys } = await scanExistingEvents(client, customerId);
+  // One paged scan of THIS org's events = the source of truth (already-imported backfill buckets +
+  // which (harness, bucket) the live daemon already covered). Cheap: a single events.list pass.
+  const { backfillKeys, liveBucketKeys } = await scanExistingEvents(client, customerId, opts.granularity);
 
-  // Upper bound: min(explicit --until, oldest live event). No live events yet → nothing to overlap.
+  // Upper bound: explicit --until, else now. We no longer hard-cap at the oldest live event — instead
+  // we skip the specific buckets live already covered (below), so backfill fills the gaps it missed.
   const explicitUntilMs = opts.until?.getTime();
-  const untilMs = Math.min(explicitUntilMs ?? Number.POSITIVE_INFINITY, earliestLiveMs ?? Number.POSITIVE_INFINITY);
-  const until = Number.isFinite(untilMs) ? new Date(untilMs) : new Date();
+  const until = explicitUntilMs != null ? new Date(explicitUntilMs) : new Date();
   const since = opts.since;
 
   const records: UsageRecord[] = [];
@@ -303,65 +312,67 @@ export async function runBackfill(
   }
   if (opts.dryRun) return result;
 
-  // Only send buckets not already imported in this org (unless --force).
-  const toSend = opts.force ? buckets : buckets.filter((b) => !backfillKeys.has(bucketKey(b)));
+  // Skip buckets we've already backfilled (backfillKeys) AND buckets the live daemon already covered
+  // (liveBucketKeys) — so re-runs fill only the gaps, never double-count live usage. `--force` ignores both.
+  const toSend = opts.force
+    ? buckets
+    : buckets.filter((b) => !backfillKeys.has(bucketKey(b)) && !liveBucketKeys.has(liveBucketKey(b)));
   result.skipped = buckets.length - toSend.length;
 
-  // Send each bucket with `async: true` so Autumn ENQUEUES it (202, no synchronous balance work),
-  // and cap in-flight requests so a big import never floods Autumn. Async responses omit `value`,
-  // so the priced $ shows up in Autumn shortly rather than in this summary.
-  // Buckets that error (after the client's own 429/5xx backoff) are collected for one retry sweep.
-  const failures: BackfillBucket[] = [];
-  const sendBucket = async (b: BackfillBucket) => {
+  // Build a track-tokens body per gap bucket. Each carries its own idempotency key, so Autumn dedups
+  // per-event server-side and re-runs are safe. `async: true` → enqueued (202), priced later, so the
+  // batch response has no per-event value (the $ shows up in Autumn shortly, not in this summary).
+  const toBody = (b: BackfillBucket) => {
     const idempotencyBase = `backfill:${b.harness}:${b.model}:${b.billingMode}:${opts.granularity}:${b.label}`;
-    const idempotencyKey = opts.idempotencySalt ? `${idempotencyBase}:${opts.idempotencySalt}` : idempotencyBase;
+    return {
+      customerId,
+      featureId: USAGE_FEATURE,
+      modelId: toModelId(b.harness, b.model),
+      timestamp: b.bucketMs,
+      inputTokens: b.inputTokens,
+      outputTokens: b.outputTokens,
+      cacheReadTokens: b.cacheReadTokens,
+      cacheWriteTokens: b.cacheWriteTokens,
+      reasoningTokens: b.reasoningTokens,
+      properties: {
+        harness: b.harness,
+        billing_mode: b.billingMode,
+        model: b.model,
+        source: "backfill",
+        bucket: b.label,
+        user_email: auth.user?.email
+      },
+      idempotencyKey: opts.idempotencySalt ? `${idempotencyBase}:${opts.idempotencySalt}` : idempotencyBase,
+      async: true
+    };
+  };
+
+  // Ship buckets via batch_track_tokens (≤1000/call), a few batches in flight. Far fewer round-trips
+  // than one call per bucket, and gentle on Autumn. A failed batch (after the client's 429/5xx
+  // backoff) is collected for one retry sweep.
+  const batches: BackfillBucket[][] = [];
+  for (let i = 0; i < toSend.length; i += BACKFILL_BATCH_SIZE) {
+    batches.push(toSend.slice(i, i + BACKFILL_BATCH_SIZE));
+  }
+  const failures: BackfillBucket[] = [];
+  const sendBatch = async (batch: BackfillBucket[]) => {
     try {
-      const res = await client.trackTokensAt({
-        customerId,
-        featureId: USAGE_FEATURE,
-        modelId: toModelId(b.harness, b.model),
-        timestamp: b.bucketMs,
-        inputTokens: b.inputTokens,
-        outputTokens: b.outputTokens,
-        cacheReadTokens: b.cacheReadTokens,
-        cacheWriteTokens: b.cacheWriteTokens,
-        reasoningTokens: b.reasoningTokens,
-        properties: {
-          harness: b.harness,
-          billing_mode: b.billingMode,
-          model: b.model,
-          source: "backfill",
-          bucket: b.label,
-          user_email: auth.user?.email
-        },
-        idempotencyKey,
-        async: true
-      });
-      const value = Number(res?.value) || 0; // present only when Autumn processes synchronously
-      result.sent += 1;
-      result.usd += value;
-      bump(b.harness, { usd: value });
-      return true;
+      await client.batchTrackTokensAt(batch.map(toBody));
+      result.sent += batch.length;
     } catch (error) {
-      if (isDuplicateIdempotency(error)) {
-        result.skipped += 1;
-        return true;
-      }
-      log.warn({ action: "backfill_track_failed", error: serializeError(error), bucket: b.label, harness: b.harness });
-      return false;
+      log.warn({ action: "backfill_batch_failed", error: serializeError(error), buckets: batch.length });
+      failures.push(...batch);
     }
   };
-  await runPool(toSend, async (b) => {
-    if (!(await sendBucket(b))) failures.push(b);
-  }, BACKFILL_CONCURRENCY);
+  await runPool(batches, sendBatch, BACKFILL_CONCURRENCY);
 
-  // One retry sweep for buckets that failed to send (idempotency makes re-sends safe).
+  // One retry sweep for batches that failed (idempotency makes re-sends safe).
   if (failures.length > 0) {
     log.info({ action: "backfill_retry_sweep", count: failures.length });
     const retrying = failures.splice(0);
-    await runPool(retrying, async (b) => {
-      if (!(await sendBucket(b))) failures.push(b);
-    }, 1);
+    for (let i = 0; i < retrying.length; i += BACKFILL_BATCH_SIZE) {
+      await sendBatch(retrying.slice(i, i + BACKFILL_BATCH_SIZE));
+    }
   }
   result.failed = failures.length;
 

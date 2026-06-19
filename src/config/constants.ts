@@ -1,6 +1,8 @@
 import type { Provider, SummerPlan, UsageHarness } from "../domain/types.ts";
 
-export const SUMMER_DIR = ".summer";
+// Home dir for auth/state/snapshots. Overridable so a local `bun dl` dev instance can run fully
+// isolated from a real `summer` install (separate auth, state, daemon) — see the `dl`/`dev` scripts.
+export const SUMMER_DIR = process.env.SUMMER_DIR ?? ".summer";
 // Production Autumn by default; `bun dl` overrides these via SUMMER_AUTUMN_API_URL/APP_URL for local.
 export const DEFAULT_AUTUMN_API_URL = "https://api.useautumn.com";
 export const DEFAULT_AUTUMN_APP_URL = "https://app.useautumn.com";

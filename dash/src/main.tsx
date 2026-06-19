@@ -5,7 +5,7 @@ import { App } from "@/App";
 import "@/index.css";
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { refetchOnWindowFocus: false, staleTime: 30_000 } }
+  defaultOptions: { queries: { refetchOnWindowFocus: false, staleTime: 30_000, retry: 1 } }
 });
 
 createRoot(document.getElementById("root")!).render(

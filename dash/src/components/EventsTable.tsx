@@ -5,7 +5,7 @@ import { Card, CardHeader } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { UsageEvent } from "@/lib/api";
-import { cn, label, relativeTime, usd } from "@/lib/utils";
+import { cn, dateTime, label, relativeTime, usd } from "@/lib/utils";
 
 const ROW = 36;
 
@@ -48,7 +48,7 @@ const COLUMNS = [
 
 function cellValue(e: UsageEvent, key: string): string {
   const p = e.properties ?? {};
-  if (key === "time") return relativeTime(e.timestamp);
+  if (key === "time") return dateTime(e.timestamp);
   if (key === "value") return usd(e.value);
   if (key === "user") return p.user_email ? String(p.user_email) : "—";
   return label(String(p[key === "mode" ? "billing_mode" : key] ?? "")) || "—";

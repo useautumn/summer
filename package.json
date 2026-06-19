@@ -14,8 +14,8 @@
   ],
   "scripts": {
     "d": "SUMMER_AUTUMN_API_URL=https://api.useautumn.com SUMMER_AUTUMN_APP_URL=https://app.useautumn.com bun src/cli.ts",
-    "dl": "SUMMER_AUTUMN_API_URL=http://localhost:8080 SUMMER_AUTUMN_APP_URL=http://localhost:3000 bun src/cli.ts",
-    "dev": "SUMMER_AUTUMN_API_URL=http://localhost:8080 SUMMER_AUTUMN_APP_URL=http://localhost:3000 bun src/cli.ts",
+    "dl": "SUMMER_DIR=.summer-dev SUMMER_OTLP_PORT=4329 SUMMER_AUTUMN_API_URL=http://localhost:8080 SUMMER_AUTUMN_APP_URL=http://localhost:3000 bun src/cli.ts",
+    "dev": "SUMMER_DIR=.summer-dev SUMMER_OTLP_PORT=4329 SUMMER_AUTUMN_API_URL=http://localhost:8080 SUMMER_AUTUMN_APP_URL=http://localhost:3000 bun src/cli.ts",
     "ts": "tsc --noEmit",
     "test": "bun test",
     "build:dash": "cd dash && bun install && bun run build",

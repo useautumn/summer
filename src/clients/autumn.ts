@@ -1,6 +1,7 @@
 import { Autumn } from "autumn-js";
 import type { CreateFeatureParams, UpdateFeatureParams } from "autumn-js";
 import { DEFAULT_AUTUMN_API_URL } from "../config/constants.ts";
+import { readAuth } from "../config/storage.ts";
 import type { SummerAuth, SummerUser } from "../domain/types.ts";
 import { log } from "../logging/logger.ts";
 
@@ -10,6 +11,40 @@ export type AutumnFeature = {
   type?: string;
   archived?: boolean;
 };
+
+export type TrackTokensAtParams = {
+  customerId: string;
+  featureId: string;
+  modelId: string;
+  timestamp: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  properties?: Record<string, unknown>;
+  idempotencyKey?: string;
+  /** Enqueue for async processing (202, no balance in response) — gentle for bulk backfill. */
+  async?: boolean;
+};
+
+/** Map our camelCase params to Autumn's snake_case track_tokens body (single + batch share this). */
+function trackTokensBody(params: TrackTokensAtParams) {
+  return {
+    customer_id: params.customerId,
+    feature_id: params.featureId,
+    model_id: params.modelId,
+    timestamp: params.timestamp,
+    input_tokens: params.inputTokens,
+    output_tokens: params.outputTokens,
+    cache_read_tokens: params.cacheReadTokens,
+    cache_write_tokens: params.cacheWriteTokens,
+    reasoning_tokens: params.reasoningTokens,
+    properties: params.properties,
+    idempotency_key: params.idempotencyKey,
+    async: params.async
+  };
+}
 
 /**
  * Was a request rejected because the OAuth access token is expired/invalid?
@@ -60,17 +95,54 @@ export class AutumnClient {
     });
   }
 
-  /** Refresh the access token (via the refresh token) and rebuild the SDK + token in place. */
+  /** Swap in a fresher auth (token + SDK). */
+  private adopt(next: SummerAuth) {
+    this.auth = next;
+    this.token = next.accessToken;
+    this.sdk = new Autumn({ secretKey: next.accessToken, serverURL: this.apiUrl });
+  }
+
+  /** Is `a` a different, not-about-to-expire access token we can use right now? */
+  private isUsable(a: SummerAuth | null | undefined): a is SummerAuth {
+    return Boolean(
+      a?.accessToken &&
+        a.accessToken !== this.token &&
+        (!a.expiresAt || a.expiresAt > Date.now() + 30_000)
+    );
+  }
+
+  /**
+   * Get a fresh access token. Refresh tokens rotate and are single-use, so with multiple
+   * processes (daemon + dash) our in-memory refresh token can already be spent. We therefore
+   * (1) re-read auth.json first — another process may have just minted a token we can adopt;
+   * (2) otherwise refresh using the freshest refresh token on disk; (3) if that loses the
+   * rotation race, re-read once more and adopt the winner's token.
+   */
   private async refreshToken(): Promise<boolean> {
-    if (!this.auth.refreshToken) return false;
+    const stored = await readAuth();
+    // Capture the freshest refresh token (and base auth) before any type narrowing.
+    const refreshToken = stored?.refreshToken ?? this.auth.refreshToken;
+    const base: SummerAuth = stored ?? this.auth;
+
+    if (this.isUsable(stored)) {
+      this.adopt(stored);
+      log.debug({ action: "autumn_token_adopted" });
+      return true;
+    }
+    if (!refreshToken) return false;
+
     try {
-      const next = await refreshSharedAuth(this.auth);
-      this.auth = next;
-      this.token = next.accessToken;
-      this.sdk = new Autumn({ secretKey: next.accessToken, serverURL: this.apiUrl });
+      const next = await refreshSharedAuth({ ...base, refreshToken });
+      this.adopt(next);
       log.debug({ action: "autumn_token_refreshed" });
       return true;
     } catch (error) {
+      const after = await readAuth();
+      if (this.isUsable(after)) {
+        this.adopt(after);
+        log.debug({ action: "autumn_token_adopted_after_race" });
+        return true;
+      }
       log.warn({ action: "autumn_token_refresh_failed", error: (error as Error)?.message });
       return false;
     }
@@ -242,35 +314,22 @@ export class AutumnClient {
    * Requires the Autumn server to forward `timestamp` on `trackTokens` (see backfill plan).
    * Returns the priced value (USD).
    */
-  async trackTokensAt(params: {
-    customerId: string;
-    featureId: string;
-    modelId: string;
-    timestamp: number;
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens?: number;
-    cacheWriteTokens?: number;
-    reasoningTokens?: number;
-    properties?: Record<string, unknown>;
-    idempotencyKey?: string;
-    /** Enqueue for async processing (202, no balance in response) — gentle for bulk backfill. */
-    async?: boolean;
-  }): Promise<{ value?: number } | null> {
-    return this.request<{ value?: number } | null>("POST", "/v1/balances.track_tokens", {
-      customer_id: params.customerId,
-      feature_id: params.featureId,
-      model_id: params.modelId,
-      timestamp: params.timestamp,
-      input_tokens: params.inputTokens,
-      output_tokens: params.outputTokens,
-      cache_read_tokens: params.cacheReadTokens,
-      cache_write_tokens: params.cacheWriteTokens,
-      reasoning_tokens: params.reasoningTokens,
-      properties: params.properties,
-      idempotency_key: params.idempotencyKey,
-      async: params.async
-    });
+  async trackTokensAt(params: TrackTokensAtParams): Promise<{ value?: number } | null> {
+    return this.request<{ value?: number } | null>(
+      "POST",
+      "/v1/balances.track_tokens",
+      trackTokensBody(params)
+    );
+  }
+
+  /**
+   * Batch up to 1000 backdated token events in one call to `/v1/balances.batch_track_tokens`.
+   * Each item keeps its own `idempotencyKey`, so Autumn dedups per-event server-side and re-runs
+   * are safe. Returns 202 with no per-item value (cost is priced asynchronously in Autumn).
+   */
+  async batchTrackTokensAt(items: TrackTokensAtParams[]): Promise<void> {
+    if (items.length === 0) return;
+    await this.request("POST", "/v1/balances.batch_track_tokens", items.map(trackTokensBody));
   }
 
   async check(params: { customerId: string; featureId: string }) {
