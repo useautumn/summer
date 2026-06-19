@@ -125,10 +125,18 @@ async function canBindPort(port: number) {
   });
 }
 
-async function daemonHealthy(port: number): Promise<boolean> {
+/**
+ * True only if a SUMMER daemon is healthy on `port`. We verify the `service: "summer"` marker in the
+ * /health body — NOT just `response.ok` — so we never mistake another service's /health for ours
+ * (e.g. an openlogs collector on 4318 also returns `{ok:true}`, which would otherwise make us reuse
+ * its port and patch Claude Code's telemetry into a black hole).
+ */
+async function summerDaemonOnPort(port: number): Promise<boolean> {
   try {
     const response = await fetch(`http://${LOCALHOST}:${port}/health`);
-    return response.ok;
+    if (!response.ok) return false;
+    const body = (await response.json().catch(() => null)) as { service?: string } | null;
+    return body?.service === "summer";
   } catch {
     return false;
   }
@@ -138,8 +146,8 @@ async function resolveAvailableOtlpPort() {
   const requested = getOtlpPort();
   if (await canBindPort(requested)) return requested;
 
-  // Busy — but if it's our own daemon already on this port, reuse it (idempotent `start`).
-  if (await daemonHealthy(requested)) return requested;
+  // Busy — but if it's OUR daemon already on this port, reuse it (idempotent `start`).
+  if (await summerDaemonOnPort(requested)) return requested;
 
   if (process.env.SUMMER_OTLP_PORT) {
     throw new Error(`SUMMER_OTLP_PORT ${requested} is already in use.`);
@@ -167,26 +175,14 @@ async function getRunningDaemon() {
   if (!port) return null;
 
   const pid = state.daemon?.pid ?? 0;
-  try {
-    const response = await fetch(`http://${LOCALHOST}:${port}/health`);
-    if (!response.ok) return null;
-  } catch {
-    return null;
-  }
-
+  if (!(await summerDaemonOnPort(port))) return null;
   return { pid, port };
 }
 
 async function waitForDaemon(port: number) {
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://${LOCALHOST}:${port}/health`);
-      if (response.ok) return;
-    } catch {
-      // Keep polling until the daemon is ready or exits.
-    }
-
+    if (await summerDaemonOnPort(port)) return;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 

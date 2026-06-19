@@ -156,11 +156,14 @@ export async function uninstallService(): Promise<void> {
   }
 }
 
-/** Is the daemon answering on its health endpoint? */
+/** Is OUR daemon answering on its health endpoint? Verifies the `service: "summer"` marker so we
+ * don't mistake another service's /health (e.g. an openlogs collector on the same port) for ours. */
 async function daemonHealthy(port: number): Promise<boolean> {
   try {
     const res = await fetch(`http://${LOCALHOST}:${port}/health`);
-    return res.ok;
+    if (!res.ok) return false;
+    const body = (await res.json().catch(() => null)) as { service?: string } | null;
+    return body?.service === "summer";
   } catch {
     return false;
   }

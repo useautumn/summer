@@ -378,7 +378,10 @@ export async function runBackfill(
   // per-event server-side and re-runs are safe. `async: true` → enqueued (202), priced later, so the
   // batch response has no per-event value (the $ shows up in Autumn shortly, not in this summary).
   const toBody = (b: BackfillBucket) => {
-    const idempotencyBase = `backfill:${b.harness}:${b.model}:${b.billingMode}:${opts.granularity}:${b.label}`;
+    // customerId MUST be in the key: Autumn scopes idempotency to org+env (NOT customer), so without
+    // it two developers in the same org produce identical keys and collide — the second's events get
+    // skipped as "duplicate", silently losing that developer's usage.
+    const idempotencyBase = `backfill:${customerId}:${b.harness}:${b.model}:${b.billingMode}:${opts.granularity}:${b.label}`;
     return {
       customerId,
       featureId: USAGE_FEATURE,

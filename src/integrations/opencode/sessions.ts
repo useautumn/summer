@@ -224,7 +224,7 @@ export async function processOpencodeSessions(client: AutumnClient, auth: Summer
           source: "opencode_session",
           user_email: auth.user?.email
         },
-        idempotencyKey: `opencode:${msg.id}:usage`
+        idempotencyKey: `opencode:${customerId}:${msg.id}:usage`
       });
       const value = Number((res as { value?: number } | null)?.value) || 0;
       pollDelta.usageUsd += value;

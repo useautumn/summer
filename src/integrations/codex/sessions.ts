@@ -326,7 +326,7 @@ export async function processCodexSessions(client: AutumnClient, auth: SummerAut
             source: "codex_session",
             user_email: auth.user?.email
           },
-          idempotencyKey: `codex:${parsed.sessionId}:${cur.input}:${cur.output}:${cur.reasoning}`
+          idempotencyKey: `codex:${customerId}:${parsed.sessionId}:${cur.input}:${cur.output}:${cur.reasoning}`
         });
         const value = Number((res as { value?: number } | null)?.value) || 0;
         pollDelta.usageUsd += value;

@@ -72,7 +72,9 @@ export async function trackUsageEvent(client: AutumnClient, auth: SummerAuth, ev
       cacheWriteTokens,
       reasoningTokens: event.reasoningTokens,
       properties: props,
-      idempotencyKey: `${key}:usage`
+      // Scope by customerId — Autumn idempotency is org+env-wide, so the composite-fallback key
+      // (no requestId) could otherwise collide across developers in the same org.
+      idempotencyKey: `${customerId}:${key}:usage`
     });
     trackedValueUsd = Number((res as { value?: number } | null)?.value) || 0;
   } catch (error) {

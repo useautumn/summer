@@ -21,8 +21,9 @@ import {
   plotInsetsEqual,
   setCachedPlotInsets
 } from "@/lib/chartGeometry";
-import { formatRangeLabel, matchedPreset, presetRange, RANGE_PRESETS, rangeDays } from "@/lib/range";
+import { DEFAULT_PRESET, formatRangeLabel, matchedPreset, presetRange, RANGE_PRESETS, rangeDays } from "@/lib/range";
 import { CHART_COLORS, cn, label, usd } from "@/lib/utils";
+import { initialParams, syncUrl } from "@/lib/urlState";
 
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -33,14 +34,34 @@ function useDebounced<T>(value: T, ms: number): T {
   return debounced;
 }
 
+// Parse the `filters` URL param (JSON map of key -> string[]); tolerate garbage.
+function parseFiltersParam(raw: string | null): Filters {
+  if (!raw) return {};
+  try {
+    const obj = JSON.parse(raw) as Record<string, unknown>;
+    const out: Filters = {};
+    for (const [k, v] of Object.entries(obj)) if (Array.isArray(v) && v.length) out[k] = v.map(String);
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 export function App() {
-  const [groupBy, setGroupBy] = useState("harness");
-  const [range, setRange] = useState<Range>(() => presetRange(30));
-  const [selected, setSelected] = useState<Customer | null>(null);
-  const [search, setSearch] = useState("");
-  const [filters, setFilters] = useState<Filters>({});
+  // Initialize state from the URL so a refresh / shared link restores filters, grouping, range, etc.
+  const init = useMemo(() => initialParams(), []);
+  const [groupBy, setGroupBy] = useState(() => init.get("group") || "harness");
+  const [range, setRange] = useState<Range>(() => {
+    const start = Number(init.get("start"));
+    const end = Number(init.get("end"));
+    return start > 0 && end > 0 ? { start, end } : presetRange(DEFAULT_PRESET);
+  });
+  const [search, setSearch] = useState(() => init.get("q") || "");
+  const [filters, setFilters] = useState<Filters>(() => parseFiltersParam(init.get("filters")));
+  const [customerId, setCustomerId] = useState(() => init.get("customer") || "");
+  // Cache the selected customer object (UserCard needs it even if a search filters it out of the list).
+  const [selectedCache, setSelectedCache] = useState<Customer | null>(null);
   const debouncedSearch = useDebounced(search, 250);
-  const customerId = selected?.id ?? "";
 
   const reduceMotion = useReducedMotion();
   const [plotInsets, setPlotInsets] = useState<PlotInsets>(
@@ -73,6 +94,38 @@ export function App() {
     queryFn: () => api.events({ customerId: customerId || undefined, range, filters, limit: 2000 }),
     placeholderData: keepPreviousData
   });
+
+  const customerList = customers.data?.list ?? [];
+  // Selected customer: prefer the cached object; else resolve from the loaded list by id.
+  const selected =
+    customerId
+      ? selectedCache?.id === customerId
+        ? selectedCache
+        : customerList.find((c) => c.id === customerId) ?? null
+      : null;
+  // Cache the object once it resolves from the list (e.g. restored from the URL on refresh).
+  useEffect(() => {
+    if (customerId && selectedCache?.id !== customerId) {
+      const match = customerList.find((c) => c.id === customerId);
+      if (match) setSelectedCache(match);
+    }
+  }, [customerId, customerList, selectedCache]);
+  const onSelectUser = (c: Customer | null) => {
+    setCustomerId(c?.id ?? "");
+    setSelectedCache(c);
+  };
+
+  // Persist the controls in the URL (replaceState) so a refresh / shared link restores them.
+  useEffect(() => {
+    syncUrl({
+      group: groupBy !== "harness" ? groupBy : undefined,
+      start: String(range.start),
+      end: String(range.end),
+      filters: Object.keys(filters).length ? JSON.stringify(filters) : undefined,
+      customer: customerId || undefined,
+      q: search || undefined
+    });
+  }, [groupBy, range, filters, customerId, search]);
 
   const usageByEmail: Record<string, number> = {};
   for (const s of byUser.data?.series ?? []) if (s.key !== "unknown") usageByEmail[s.key] = s.total;
@@ -161,12 +214,12 @@ export function App() {
           <div className="flex min-h-0 flex-1 flex-col">
             <div className="mb-2 text-sm font-medium text-foreground">Users</div>
             <UserList
-              customers={customers.data?.list ?? []}
+              customers={customerList}
               isLoading={customers.isLoading}
               search={search}
               onSearch={setSearch}
               selectedId={customerId}
-              onSelect={setSelected}
+              onSelect={onSelectUser}
               usageByEmail={usageByEmail}
             />
           </div>
@@ -203,11 +256,11 @@ export function App() {
                     align="end"
                     onPick={(end) => setRange((r) => ({ ...r, end }))}
                   />
-                  {activePreset !== 30 && (
+                  {activePreset !== DEFAULT_PRESET.key && (
                     <button
                       type="button"
-                      onClick={() => setRange(presetRange(30))}
-                      title="Reset to last 30 days"
+                      onClick={() => setRange(presetRange(DEFAULT_PRESET))}
+                      title="Reset to last month"
                       className="ml-0.5 flex h-5 w-5 items-center justify-center rounded text-tertiary-foreground transition-colors hover:bg-interactive-secondary-hover hover:text-foreground"
                     >
                       <RotateCcw className="h-3.5 w-3.5" />
@@ -217,12 +270,12 @@ export function App() {
                 <div className="flex rounded-lg border border-border bg-interactive-secondary p-1">
                   {RANGE_PRESETS.map((r) => (
                     <button
-                      key={r.days}
+                      key={r.key}
                       type="button"
-                      onClick={() => setRange(presetRange(r.days))}
+                      onClick={() => setRange(presetRange(r))}
                       className={cn(
                         "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-                        activePreset === r.days
+                        activePreset === r.key
                           ? "bg-active-primary text-foreground shadow-sm ring-1 ring-inset ring-white/10"
                           : "text-tertiary-foreground hover:text-foreground"
                       )}

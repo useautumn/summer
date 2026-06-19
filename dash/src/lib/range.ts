@@ -2,11 +2,14 @@ import type { Range } from "@/lib/api";
 
 const DAY_MS = 86_400_000;
 
-export const RANGE_PRESETS = [
-  { days: 7, label: "7d" },
-  { days: 30, label: "30d" },
-  { days: 90, label: "90d" }
-] as const;
+export type RangePreset = { key: string; label: string; weeks?: number; months?: number };
+
+export const RANGE_PRESETS: RangePreset[] = [
+  { key: "1w", label: "1w", weeks: 1 },
+  { key: "1m", label: "1m", months: 1 },
+  { key: "3m", label: "3m", months: 3 }
+];
+export const DEFAULT_PRESET = RANGE_PRESETS[1]; // 1 month
 
 // The server buckets by UTC day, so keep the date inputs on UTC boundaries too
 // (avoids off-by-one day labels in non-UTC timezones).
@@ -21,11 +24,14 @@ const endOfUtcDay = (ms: number) => {
   return d.getTime();
 };
 
-/** A preset window of the last `days` days, inclusive of today (N day buckets). */
-export const presetRange = (days: number): Range => {
+/** A preset window ending today, going back 1 week / 1 or 3 calendar months (calendar-accurate, so
+ * "1m" from 19 Jun is 19 May — not "30 days" which lands a day off and confuses people). */
+export const presetRange = (p: RangePreset): Range => {
   const end = endOfUtcDay(Date.now());
-  const start = startOfUtcDay(end - (days - 1) * DAY_MS);
-  return { start, end };
+  const d = new Date(end);
+  if (p.months) d.setUTCMonth(d.getUTCMonth() - p.months);
+  if (p.weeks) d.setUTCDate(d.getUTCDate() - p.weeks * 7);
+  return { start: startOfUtcDay(d.getTime()), end };
 };
 
 /** `yyyy-mm-dd` for an `<input type="date">`, in UTC. */
@@ -48,10 +54,10 @@ export const fromDateInputEnd = (s: string) => Date.parse(`${s}T23:59:59.999Z`);
 export const rangeDays = (r: Range) => Math.max(1, Math.round((r.end - r.start) / DAY_MS));
 
 /** Which preset (if any) the current range corresponds to, for highlighting. */
-export const matchedPreset = (r: Range): number | null => {
+export const matchedPreset = (r: Range): string | null => {
   for (const p of RANGE_PRESETS) {
-    const pr = presetRange(p.days);
-    if (Math.abs(pr.start - r.start) < DAY_MS && Math.abs(pr.end - r.end) < DAY_MS) return p.days;
+    const pr = presetRange(p);
+    if (Math.abs(pr.start - r.start) < DAY_MS && Math.abs(pr.end - r.end) < DAY_MS) return p.key;
   }
   return null;
 };

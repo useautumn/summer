@@ -164,6 +164,20 @@ export async function serveForeground(port = 4318, options: { debug?: boolean } 
 
 export async function setupSummerFeatures(client: AutumnClient) {
   const remoteFeatures = await client.listFeatures();
+
+  // Safety: Summer only owns its own feature(s). If the org has ANY other (non-archived) feature,
+  // it's a real product org — refuse to set up here so we never touch the user's existing Autumn data.
+  const summerIds = new Set(SUMMER_FEATURES.map((f) => f.id));
+  const foreign = remoteFeatures.list.filter((f) => !summerIds.has(f.id) && !f.archived);
+  if (foreign.length > 0) {
+    const shown = foreign.slice(0, 5).map((f) => f.id).join(", ");
+    throw new Error(
+      `This Autumn org already has features (${shown}${foreign.length > 5 ? ", …" : ""}). ` +
+        `Summer only runs in a dedicated org so it never modifies your product data. ` +
+        `Create a fresh Autumn org for Summer, then run \`summer start --switch-org\`.`
+    );
+  }
+
   const existingFeatureIds = new Set(remoteFeatures.list.map((feature) => feature.id));
   const result = {
     created: [] as string[],
