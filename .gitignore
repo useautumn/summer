@@ -2,3 +2,5 @@ node_modules
 .summer
 dist
 *.log
+
+.DS_Store
