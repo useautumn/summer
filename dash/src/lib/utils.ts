@@ -34,6 +34,9 @@ export function label(value: string): string {
   if (value === "unknown") return "Unknown";
   if (value === "claude_code") return "Claude Code";
   if (value === "codex") return "Codex";
+  if (value === "opencode") return "OpenCode";
+  if (value === "amp") return "Amp";
+  if (value === "pi") return "Pi";
   if (value === "api") return "API";
   if (value === "subscription") return "Subscription";
   if (value.length > 22 && /^[a-f0-9-]+$/i.test(value)) return `${value.slice(0, 8)}…`;

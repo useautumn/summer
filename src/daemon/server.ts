@@ -9,6 +9,8 @@ import { trackUsageEvent } from "../tracking/tracker.ts";
 import { processClaudeOauthUsage } from "../tracking/oauthUsage.ts";
 import { processCodexSessions } from "../integrations/codex/sessions.ts";
 import { processOpencodeSessions } from "../integrations/opencode/sessions.ts";
+import { processAmpSessions } from "../integrations/amp/sessions.ts";
+import { processPiSessions } from "../integrations/pi/sessions.ts";
 import { syncCustomerMetadata } from "../tracking/metadata.ts";
 
 export async function serveForeground(port = 4318, options: { debug?: boolean } = {}) {
@@ -144,6 +146,52 @@ export async function serveForeground(port = 4318, options: { debug?: boolean } 
   };
   setTimeout(pollOpencode, 7_000);
   setInterval(pollOpencode, opencodeIntervalMs);
+
+  // Amp/Pi both update the same state.json totals. Serialize them and guard each interval so a
+  // slow initial scan cannot overlap its next tick and double-apply locally deduped usage.
+  let extendedHarnessQueue: Promise<void> = Promise.resolve();
+  const enqueueExtendedHarness = (run: () => Promise<void>) => {
+    const queued = extendedHarnessQueue.then(run, run);
+    extendedHarnessQueue = queued.catch(() => undefined);
+    return queued;
+  };
+  let ampPolling = false;
+  const ampIntervalMs = Math.max(15_000, Number(process.env.SUMMER_AMP_INTERVAL_MS ?? 30_000));
+  const pollAmp = async () => {
+    if (ampPolling) return;
+    ampPolling = true;
+    try {
+      await enqueueExtendedHarness(async () => {
+        const ampAuth = await readAuth();
+        if (ampAuth) await processAmpSessions(new AutumnClient(ampAuth), ampAuth);
+      });
+    } catch (error) {
+      log.warn({ action: "amp_poll_error", error: serializeError(error) });
+    } finally {
+      ampPolling = false;
+    }
+  };
+  setTimeout(pollAmp, 9_000);
+  setInterval(pollAmp, ampIntervalMs);
+
+  let piPolling = false;
+  const piIntervalMs = Math.max(15_000, Number(process.env.SUMMER_PI_INTERVAL_MS ?? 30_000));
+  const pollPi = async () => {
+    if (piPolling) return;
+    piPolling = true;
+    try {
+      await enqueueExtendedHarness(async () => {
+        const piAuth = await readAuth();
+        if (piAuth) await processPiSessions(new AutumnClient(piAuth), piAuth);
+      });
+    } catch (error) {
+      log.warn({ action: "pi_poll_error", error: serializeError(error) });
+    } finally {
+      piPolling = false;
+    }
+  };
+  setTimeout(pollPi, 11_000);
+  setInterval(pollPi, piIntervalMs);
 
   // Cron: sync plan + usage% onto the Autumn customer metadata (for the dashboard to read).
   const metadataIntervalMs = Math.max(60_000, Number(process.env.SUMMER_METADATA_INTERVAL_MS ?? 5 * 60_000));

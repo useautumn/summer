@@ -381,11 +381,11 @@ function printBackfill(res: BackfillResult) {
 
 program
   .command("backfill")
-  .description("Import historical Claude Code, Codex + opencode usage into Autumn (backdated, aggregated).")
+  .description("Import historical Claude Code, Codex, OpenCode, Amp + Pi usage into Autumn (backdated, aggregated).")
   .option("--since <date>", "Only backfill usage on/after this date (e.g. 2026-05-01)")
   .option("--until <date>", "Only backfill usage before this date (default: auto-cap at first live event)")
   .option("--granularity <granularity>", "Aggregation bucket: daily | hourly", "daily")
-  .option("--harness <harness>", "Which harness: claude | codex | opencode | all", "all")
+  .option("--harness <harness>", "Which harness: claude | codex | opencode | amp | pi | all", "all")
   .option("--billing-mode <mode>", "Claude billing mode (transcripts don't record it): subscription | api", "subscription")
   .option("--dry-run", "Show what would be sent without sending anything")
   .option("--force", "Re-send buckets even if already present in Autumn (idempotency still dedups)")
@@ -409,7 +409,7 @@ program
       };
       const granularity: Granularity = opts.granularity === "hourly" ? "hourly" : "daily";
       const harness: HarnessSelector =
-        opts.harness === "claude" || opts.harness === "codex" || opts.harness === "opencode"
+        opts.harness === "claude" || opts.harness === "codex" || opts.harness === "opencode" || opts.harness === "amp" || opts.harness === "pi"
           ? opts.harness
           : "all";
       const billingMode: BillingMode = opts.billingMode === "api" ? "api" : "subscription";
@@ -419,7 +419,7 @@ program
       const auth = await ensureCustomer();
       const client = new AutumnClient(auth);
       console.log(
-        `Reading local ${harness === "all" ? "Claude Code, Codex + opencode" : harness} history…${opts.dryRun ? " (dry run)" : ""}`
+        `Reading local ${harness === "all" ? "Claude Code, Codex, OpenCode, Amp + Pi" : harness} history…${opts.dryRun ? " (dry run)" : ""}`
       );
       const res = await runBackfill(client, auth, {
         since,
@@ -466,7 +466,7 @@ function printStartSummary(
     `Autostart:    ${opts.autostart ? `on (${opts.autostart}) — restarts on login/reboot` : "off"}`
   );
   console.log(line);
-  console.log("Next: use Claude Code or Codex as usual — usage is tracked automatically.");
+  console.log("Next: use your supported coding agents as usual — usage is tracked automatically.");
   console.log("View it with `summer report` or `summer dash`.");
   console.log();
 }
@@ -502,7 +502,7 @@ async function maybeOfferBackfill(
   const state = await readState();
   if (state.backfillPromptedAt) return; // already asked once — use `summer backfill` to import later.
 
-  const doIt = await confirm("Import your existing Claude Code, Codex + opencode history now?", {
+  const doIt = await confirm("Import your existing Claude Code, Codex, OpenCode, Amp + Pi history now?", {
     default: opts.firstRun
   });
   await writeState({ ...(await readState()), backfillPromptedAt: new Date().toISOString() });
@@ -516,7 +516,7 @@ async function maybeOfferBackfill(
 
 program
   .command("start")
-  .description("Set up (if needed) and start Summer — configures Claude Code, Codex + opencode.")
+  .description("Set up (if needed) and start Summer — tracks Claude Code, Codex, OpenCode, Amp + Pi.")
   .option("--debug", "Run in the foreground with debug logs.")
   .option("--yes", "Skip the org confirmation prompt.")
   .option("--switch-org", "Log in again to choose a different Autumn org before setup.")
