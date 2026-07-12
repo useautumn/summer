@@ -46,8 +46,7 @@ export const HARNESS_PROVIDER: Record<UsageHarness, Provider> = {
   // opencode is multi-provider; it supplies its own `providerID` per message, so this fallback
   // is only used if an opencode event somehow lacks a provider.
   opencode: "anthropic",
-  // Amp and Pi are multi-provider; their session readers always provide the actual provider.
-  amp: "anthropic",
+  // Pi is multi-provider; its session reader always provides the actual provider.
   pi: "anthropic"
 };
 

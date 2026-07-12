@@ -22,7 +22,7 @@ export type SummerUser = {
   name?: string | null;
 };
 
-export type UsageHarness = "claude_code" | "codex" | "opencode" | "amp" | "pi";
+export type UsageHarness = "claude_code" | "codex" | "opencode" | "pi";
 
 /**
  * How a developer's AI usage is paid for, derived from telemetry:
@@ -90,8 +90,6 @@ export type SummerState = {
   codexUsage?: { at: string; fiveHourPct?: number; sevenDayPct?: number; planType?: string | null };
   /** opencode assistant-message ids already tracked (id → createdMs), pruned to the recent window. */
   opencodeSeen?: Record<string, number>;
-  /** Amp assistant-message ids already tracked (threadId:messageId → createdMs). */
-  ampSeen?: Record<string, number>;
   /** Pi assistant-message ids already tracked (sessionId:messageId → createdMs). */
   piSeen?: Record<string, number>;
   /** The Autumn org the user confirmed to set Summer up in — gates the `start`/`setup` org prompt. */
