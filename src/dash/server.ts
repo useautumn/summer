@@ -94,6 +94,6 @@ export async function serveDash(port: number) {
     return new Response(file);
   });
 
-  Bun.serve({ hostname: "127.0.0.1", port, fetch: app.fetch });
+  Bun.serve({ hostname: "127.0.0.1", port, idleTimeout: 255, fetch: app.fetch });
   log.info({ action: "dash_listening", url: `http://127.0.0.1:${port}` });
 }
