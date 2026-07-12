@@ -85,6 +85,11 @@ const wantPi = (h: HarnessSelector) => h === "all" || h === "pi";
 const modelIdOf = (b: { harness: UsageHarness; model: string; provider?: string }) =>
   b.provider ? `${b.provider}/${b.model}` : toModelId(b.harness, b.model);
 
+// Preserve the idempotency identity emitted by older releases for single-provider harnesses.
+// Multi-provider harnesses need the provider-qualified id to avoid cross-provider collisions.
+export const idempotencyModelOf = (b: { model: string; provider?: string }) =>
+  b.provider ? `${b.provider}/${b.model}` : b.model;
+
 /** Floor an instant to the start of its UTC day/hour (matches how live events + the dash bucket). */
 function floorBucket(at: Date, g: Granularity): number {
   if (g === "hourly") {
@@ -403,7 +408,7 @@ export async function runBackfill(
     // customerId MUST be in the key: Autumn scopes idempotency to org+env (NOT customer), so without
     // it two developers in the same org produce identical keys and collide — the second's events get
     // skipped as "duplicate", silently losing that developer's usage.
-    const idempotencyBase = `backfill:${customerId}:${b.harness}:${modelIdOf(b)}:${b.billingMode}:${opts.granularity}:${b.label}`;
+    const idempotencyBase = `backfill:${customerId}:${b.harness}:${idempotencyModelOf(b)}:${b.billingMode}:${opts.granularity}:${b.label}`;
     return {
       customerId,
       featureId: USAGE_FEATURE,

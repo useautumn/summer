@@ -76,7 +76,7 @@ async function walkJsonl(dir: string, sinceMs: number, out: PiUsageRecord[]) {
     else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
       try {
         if ((await stat(path)).mtimeMs < sinceMs) continue;
-        out.push(...parsePiSession(await readFile(path, "utf8")));
+        out.push(...parsePiSession(await readFile(path, "utf8")).filter((r) => r.createdMs >= sinceMs));
       } catch { /* skip files being replaced while Pi writes */ }
     }
   }
@@ -89,7 +89,11 @@ export async function collectPiRecords(sinceMs = 0) {
 }
 
 const emptyTotals = (at: string): SummerTotals => ({ since: at, prepaidUsd: 0, usageUsd: 0, usageRealUsd: 0, usageSubUsd: 0, inputTokens: 0, outputTokens: 0 });
-const unpriceable = (e: unknown) => /not found in models\.dev/i.test(`${(e as { body?: string; message?: string })?.body ?? ""} ${(e as { message?: string })?.message ?? ""}`);
+const unpriceable = (e: unknown) => {
+  const error = e as { statusCode?: number; status?: number; body?: string; message?: string };
+  return (error?.statusCode === 400 || error?.status === 400)
+    && /not found in models\.dev/i.test(`${error?.body ?? ""} ${error?.message ?? ""}`);
+};
 
 export async function processPiSessions(client: AutumnClient, auth: SummerAuth) {
   const customerId = auth.user?.id;
@@ -109,7 +113,7 @@ export async function processPiSessions(client: AutumnClient, auth: SummerAuth) 
       const value = Number((res as { value?: number } | null)?.value) || 0;
       usageUsd += value;
       if (r.billingMode === "api") usageRealUsd += value; else usageSubUsd += value;
-      inputTokens += r.tokens.input + r.tokens.cacheRead;
+      inputTokens += r.tokens.input + r.tokens.cacheRead + r.tokens.cacheWrite;
       outputTokens += r.tokens.output;
       seen[r.id] = r.createdMs;
       changed = true;
@@ -128,5 +132,5 @@ export async function processPiSessions(client: AutumnClient, auth: SummerAuth) 
 
 export async function gatherPiRecords(opts: { since?: Date; until?: Date }) {
   const since = opts.since?.getTime(), until = opts.until?.getTime();
-  return (await collectPiRecords(0)).filter((r) => (since == null || r.createdMs >= since) && (until == null || r.createdMs < until));
+  return (await collectPiRecords(since ?? 0)).filter((r) => (since == null || r.createdMs >= since) && (until == null || r.createdMs < until));
 }

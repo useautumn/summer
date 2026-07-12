@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { collectClaudeRecords } from "../src/integrations/claude/transcripts.ts";
 import { parseSessionTimeline } from "../src/integrations/codex/sessions.ts";
+import { idempotencyModelOf } from "../src/tracking/backfill.ts";
+
+test("backfill idempotency keeps legacy model keys unless provider disambiguation is needed", () => {
+  expect(idempotencyModelOf({ model: "claude-opus-4-8" })).toBe("claude-opus-4-8");
+  expect(idempotencyModelOf({ model: "gpt-5.4", provider: "openai" })).toBe("openai/gpt-5.4");
+});
 
 test("collectClaudeRecords dedups by (message.id, requestId) and skips synthetic", () => {
   const line = (id: string, req: string, model: string, ts: string, inTok: number) =>

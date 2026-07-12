@@ -35,3 +35,17 @@ test("collectPiRecords honors PI_CODING_AGENT_SESSION_DIR", async () => {
   try { expect(await collectPiRecords(0)).toHaveLength(1); }
   finally { delete process.env.PI_CODING_AGENT_SESSION_DIR; }
 });
+
+test("collectPiRecords filters old messages inside recently-touched sessions", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "summer-pi-window-"));
+  await mkdir(join(dir, "project"));
+  const session = [
+    line({ type: "session", id: "S-1" }),
+    line({ type: "message", id: "old", message: { role: "assistant", provider: "openai-codex", model: "gpt-5.4", timestamp: Date.parse("2020-01-01T00:00:00Z"), usage: { input: 1 } } }),
+    line({ type: "message", id: "recent", message: { role: "assistant", provider: "openai-codex", model: "gpt-5.4", timestamp: Date.now(), usage: { input: 1 } } })
+  ].join("\n");
+  await writeFile(join(dir, "project", "session.jsonl"), session);
+  process.env.PI_CODING_AGENT_SESSION_DIR = dir;
+  try { expect((await collectPiRecords(Date.now() - 60_000)).map((r) => r.id)).toEqual(["S-1:recent"]); }
+  finally { delete process.env.PI_CODING_AGENT_SESSION_DIR; }
+});

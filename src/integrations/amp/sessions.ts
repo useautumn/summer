@@ -38,9 +38,9 @@ type AmpThread = {
   }>;
 };
 
-function ampThreadDirs(): string[] {
+export function ampThreadDirs(): string[] {
   const explicit = process.env.AMP_DATA_DIR;
-  if (explicit) return [...new Set(explicit.split(",").map((s) => join(s.trim(), "threads")).filter(Boolean))];
+  if (explicit) return [...new Set(explicit.split(",").map((s) => s.trim()).filter(Boolean).map((s) => join(s, "threads")))];
   const dirs: string[] = [];
   if (process.env.XDG_DATA_HOME) dirs.push(join(process.env.XDG_DATA_HOME, "amp", "threads"));
   dirs.push(join(homedir(), ".local", "share", "amp", "threads"));
@@ -108,7 +108,7 @@ export async function collectAmpRecords(sinceMs = 0): Promise<AmpUsageRecord[]> 
       const path = join(dir, name);
       try {
         if ((await stat(path)).mtimeMs < sinceMs) continue;
-        out.push(...parseAmpThread(await readFile(path, "utf8"), name));
+        out.push(...parseAmpThread(await readFile(path, "utf8"), name).filter((r) => r.createdMs >= sinceMs));
       } catch { /* skip files being replaced while Amp writes */ }
     }
   }
@@ -116,7 +116,11 @@ export async function collectAmpRecords(sinceMs = 0): Promise<AmpUsageRecord[]> 
 }
 
 const emptyTotals = (at: string): SummerTotals => ({ since: at, prepaidUsd: 0, usageUsd: 0, usageRealUsd: 0, usageSubUsd: 0, inputTokens: 0, outputTokens: 0 });
-const unpriceable = (e: unknown) => /not found in models\.dev/i.test(`${(e as { body?: string; message?: string })?.body ?? ""} ${(e as { message?: string })?.message ?? ""}`);
+const unpriceable = (e: unknown) => {
+  const error = e as { statusCode?: number; status?: number; body?: string; message?: string };
+  return (error?.statusCode === 400 || error?.status === 400)
+    && /not found in models\.dev/i.test(`${error?.body ?? ""} ${error?.message ?? ""}`);
+};
 
 export async function processAmpSessions(client: AutumnClient, auth: SummerAuth) {
   const customerId = auth.user?.id;
@@ -139,7 +143,7 @@ export async function processAmpSessions(client: AutumnClient, auth: SummerAuth)
       const value = Number((res as { value?: number } | null)?.value) || 0;
       usageUsd += value;
       if (r.billingMode === "api") usageRealUsd += value; else usageSubUsd += value;
-      inputTokens += r.tokens.input + r.tokens.cacheRead;
+      inputTokens += r.tokens.input + r.tokens.cacheRead + r.tokens.cacheWrite;
       outputTokens += r.tokens.output;
       seen[r.id] = r.createdMs;
       changed = true;
