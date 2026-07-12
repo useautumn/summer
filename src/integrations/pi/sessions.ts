@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +13,19 @@ const SEEN_RETAIN_MS = 7 * 24 * 60 * 60 * 1000;
 export type PiUsageRecord = {
   id: string; sessionId: string; provider: string; model: string; createdMs: number; billingMode: BillingMode;
   tokens: { input: number; output: number; cacheRead: number; cacheWrite: number };
+};
+
+type PiSessionRow = {
+  type?: string;
+  id?: string;
+  timestamp?: string | number;
+  message?: {
+    role?: string;
+    provider?: string;
+    model?: string;
+    timestamp?: string | number;
+    usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  };
 };
 
 export function normalizePiProvider(provider: string): string {
@@ -38,7 +50,7 @@ export function parsePiSession(text: string): PiUsageRecord[] {
   const out: PiUsageRecord[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
-    let row: Record<string, any>;
+    let row: PiSessionRow;
     try { row = JSON.parse(line); } catch { continue; }
     if (row.type === "session" && typeof row.id === "string") { sessionId = row.id; continue; }
     const message = row.message;
@@ -84,7 +96,7 @@ async function walkJsonl(dir: string, sinceMs: number, out: PiUsageRecord[]) {
 
 export async function collectPiRecords(sinceMs = 0) {
   const out: PiUsageRecord[] = [];
-  for (const root of piSessionRoots()) if (existsSync(root)) await walkJsonl(root, sinceMs, out);
+  for (const root of piSessionRoots()) await walkJsonl(root, sinceMs, out);
   return out;
 }
 
