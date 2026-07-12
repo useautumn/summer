@@ -9,6 +9,7 @@ import { trackUsageEvent } from "../tracking/tracker.ts";
 import { processClaudeOauthUsage } from "../tracking/oauthUsage.ts";
 import { processCodexSessions } from "../integrations/codex/sessions.ts";
 import { processOpencodeSessions } from "../integrations/opencode/sessions.ts";
+import { processDroidSessions } from "../integrations/droid/sessions.ts";
 import { syncCustomerMetadata } from "../tracking/metadata.ts";
 
 export async function serveForeground(port = 4318, options: { debug?: boolean } = {}) {
@@ -144,6 +145,20 @@ export async function serveForeground(port = 4318, options: { debug?: boolean } 
   };
   setTimeout(pollOpencode, 7_000);
   setInterval(pollOpencode, opencodeIntervalMs);
+
+  // Poll Factory Droid's cumulative per-session token snapshots.
+  const droidIntervalMs = Math.max(15_000, Number(process.env.SUMMER_DROID_INTERVAL_MS ?? 30_000));
+  const pollDroid = async () => {
+    try {
+      const droidAuth = await readAuth();
+      if (!droidAuth) return;
+      await processDroidSessions(new AutumnClient(droidAuth), droidAuth);
+    } catch (error) {
+      log.warn({ action: "droid_poll_error", error: serializeError(error) });
+    }
+  };
+  setTimeout(pollDroid, 9_000);
+  setInterval(pollDroid, droidIntervalMs);
 
   // Cron: sync plan + usage% onto the Autumn customer metadata (for the dashboard to read).
   const metadataIntervalMs = Math.max(60_000, Number(process.env.SUMMER_METADATA_INTERVAL_MS ?? 5 * 60_000));

@@ -45,7 +45,9 @@ export const HARNESS_PROVIDER: Record<UsageHarness, Provider> = {
   codex: "openai",
   // opencode is multi-provider; it supplies its own `providerID` per message, so this fallback
   // is only used if an opencode event somehow lacks a provider.
-  opencode: "anthropic"
+  opencode: "anthropic",
+  // Droid is multi-provider too; its session reader always supplies the inferred model provider.
+  droid: "anthropic"
 };
 
 export const toModelId = (harness: UsageHarness, model: string) =>

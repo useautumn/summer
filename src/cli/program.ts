@@ -20,6 +20,7 @@ import { type BackfillResult, type Granularity, type HarnessSelector, runBackfil
 import type { BillingMode, SummerAuth } from "../domain/types.ts";
 import { patchClaudeSettings, restoreClaudeSettings } from "../integrations/claude/settings.ts";
 import { patchCodexSettings, restoreCodexSettings } from "../integrations/codex/settings.ts";
+import { processDroidSessions } from "../integrations/droid/sessions.ts";
 import { choose, confirm, isInteractive } from "./prompts.ts";
 import { bold, dim } from "./style.ts";
 import {
@@ -381,11 +382,11 @@ function printBackfill(res: BackfillResult) {
 
 program
   .command("backfill")
-  .description("Import historical Claude Code, Codex + opencode usage into Autumn (backdated, aggregated).")
+  .description("Import historical Claude Code, Codex, opencode + Droid usage into Autumn (backdated, aggregated).")
   .option("--since <date>", "Only backfill usage on/after this date (e.g. 2026-05-01)")
   .option("--until <date>", "Only backfill usage before this date (default: auto-cap at first live event)")
   .option("--granularity <granularity>", "Aggregation bucket: daily | hourly", "daily")
-  .option("--harness <harness>", "Which harness: claude | codex | opencode | all", "all")
+  .option("--harness <harness>", "Which harness: claude | codex | opencode | droid | all", "all")
   .option("--billing-mode <mode>", "Claude billing mode (transcripts don't record it): subscription | api", "subscription")
   .option("--dry-run", "Show what would be sent without sending anything")
   .option("--force", "Re-send buckets even if already present in Autumn (idempotency still dedups)")
@@ -409,7 +410,7 @@ program
       };
       const granularity: Granularity = opts.granularity === "hourly" ? "hourly" : "daily";
       const harness: HarnessSelector =
-        opts.harness === "claude" || opts.harness === "codex" || opts.harness === "opencode"
+        opts.harness === "claude" || opts.harness === "codex" || opts.harness === "opencode" || opts.harness === "droid"
           ? opts.harness
           : "all";
       const billingMode: BillingMode = opts.billingMode === "api" ? "api" : "subscription";
@@ -419,7 +420,7 @@ program
       const auth = await ensureCustomer();
       const client = new AutumnClient(auth);
       console.log(
-        `Reading local ${harness === "all" ? "Claude Code, Codex + opencode" : harness} history…${opts.dryRun ? " (dry run)" : ""}`
+        `Reading local ${harness === "all" ? "Claude Code, Codex, opencode + Droid" : harness} history…${opts.dryRun ? " (dry run)" : ""}`
       );
       const res = await runBackfill(client, auth, {
         since,
@@ -434,6 +435,41 @@ program
       printBackfill(res);
     }
   );
+
+program
+  .command("droid")
+  .description("Poll Factory Droid sessions once and track new usage.")
+  .option("--dry-run", "Show what the poll would send without sending anything")
+  .action(async (opts: { dryRun?: boolean }) => {
+    const auth = await readAuth();
+    if (!auth) {
+      console.log('Not logged in — run "summer login" first.');
+      return;
+    }
+    const dryRun = Boolean(opts.dryRun);
+    const deltas = await processDroidSessions(new AutumnClient(auth), auth, { dryRun });
+    const line = "─".repeat(60);
+    console.log(`\nSummer — Droid${dryRun ? " (DRY RUN — nothing sent)" : ""}`);
+    console.log(line);
+    if (deltas.length === 0) {
+      console.log("Nothing new — all recent Droid sessions are already tracked.");
+    } else {
+      for (const d of deltas) {
+        const t = d.tokens;
+        console.log(`${d.at.toISOString()}  ${d.provider}/${d.model}  [${d.billingMode}]  ${dim(d.sessionId)}`);
+        console.log(
+          `  in ${t.input.toLocaleString()}  out ${t.output.toLocaleString()}  cache-read ${t.cacheRead.toLocaleString()}  cache-write ${t.cacheWrite.toLocaleString()}  reasoning ${t.reasoning.toLocaleString()}`
+        );
+      }
+      console.log(line);
+      console.log(
+        dryRun
+          ? `${deltas.length} session delta(s) would be sent. Re-run without --dry-run to track them.`
+          : `Tracked ${deltas.length} session delta(s).`
+      );
+    }
+    console.log();
+  });
 
 program
   .command("dash")
@@ -466,7 +502,7 @@ function printStartSummary(
     `Autostart:    ${opts.autostart ? `on (${opts.autostart}) — restarts on login/reboot` : "off"}`
   );
   console.log(line);
-  console.log("Next: use Claude Code or Codex as usual — usage is tracked automatically.");
+  console.log("Next: use Claude Code, Codex, opencode or Droid as usual — usage is tracked automatically.");
   console.log("View it with `summer report` or `summer dash`.");
   console.log();
 }
@@ -516,7 +552,7 @@ async function maybeOfferBackfill(
 
 program
   .command("start")
-  .description("Set up (if needed) and start Summer — configures Claude Code, Codex + opencode.")
+  .description("Set up (if needed) and start Summer — tracks Claude Code, Codex, opencode + Droid.")
   .option("--debug", "Run in the foreground with debug logs.")
   .option("--yes", "Skip the org confirmation prompt.")
   .option("--switch-org", "Log in again to choose a different Autumn org before setup.")

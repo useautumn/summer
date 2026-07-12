@@ -22,7 +22,7 @@ export type SummerUser = {
   name?: string | null;
 };
 
-export type UsageHarness = "claude_code" | "codex" | "opencode";
+export type UsageHarness = "claude_code" | "codex" | "opencode" | "droid";
 
 /**
  * How a developer's AI usage is paid for, derived from telemetry:
@@ -90,6 +90,11 @@ export type SummerState = {
   codexUsage?: { at: string; fiveHourPct?: number; sevenDayPct?: number; planType?: string | null };
   /** opencode assistant-message ids already tracked (id → createdMs), pruned to the recent window. */
   opencodeSeen?: Record<string, number>;
+  /** Per-Droid-session cumulative token totals, used to emit only deltas across polls/restarts. */
+  droidSessions?: Record<
+    string,
+    { mtime: number; input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number }
+  >;
   /** The Autumn org the user confirmed to set Summer up in — gates the `start`/`setup` org prompt. */
   setup?: { orgId: string; confirmedAt: string };
   /** The installed on-boot autostart service (launchd on macOS, systemd --user on Linux). */

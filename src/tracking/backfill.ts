@@ -5,11 +5,12 @@ import { readState, writeState } from "../config/storage.ts";
 import type { BillingMode, SummerAuth, UsageHarness } from "../domain/types.ts";
 import { readClaudeUsageRecords } from "../integrations/claude/transcripts.ts";
 import { listCodexSessionFiles, parseSessionTimeline } from "../integrations/codex/sessions.ts";
+import { gatherDroidRecords } from "../integrations/droid/sessions.ts";
 import { gatherOpencodeRecords } from "../integrations/opencode/sessions.ts";
 import { log, serializeError } from "../logging/logger.ts";
 
 export type Granularity = "daily" | "hourly";
-export type HarnessSelector = "claude" | "codex" | "opencode" | "all";
+export type HarnessSelector = "claude" | "codex" | "opencode" | "droid" | "all";
 
 export type BackfillOptions = {
   since?: Date;
@@ -76,6 +77,7 @@ function isUnpriceableModel(error: unknown): boolean {
 const wantClaude = (h: HarnessSelector) => h === "all" || h === "claude";
 const wantCodex = (h: HarnessSelector) => h === "all" || h === "codex";
 const wantOpencode = (h: HarnessSelector) => h === "all" || h === "opencode";
+const wantDroid = (h: HarnessSelector) => h === "all" || h === "droid";
 
 /** Models.dev model id for a bucket. opencode supplies its own provider; others derive from harness. */
 const modelIdOf = (b: { harness: UsageHarness; model: string; provider?: string }) =>
@@ -239,6 +241,27 @@ async function gatherOpencode(opts: { since?: Date; until?: Date }): Promise<Usa
   }));
 }
 
+async function gatherDroid(opts: { since?: Date; until?: Date; force?: boolean }): Promise<UsageRecord[]> {
+  // Droid dedup vs live tracking is SESSION-level at gather time (not bucket-level): sessions the
+  // live poller already tracked are excluded here, because Droid has no timeline — a partially
+  // live-tracked session can't be split into "already sent" and "missing" buckets. `--force`
+  // includes them again (idempotency + the live-covered-bucket skip still guard re-sends).
+  const tracked = opts.force ? undefined : new Set(Object.keys((await readState()).droidSessions ?? {}));
+  const sessions = await gatherDroidRecords({ since: opts.since, until: opts.until, excludeFiles: tracked });
+  return sessions.map((s) => ({
+    at: s.at,
+    harness: "droid" as const,
+    model: s.model,
+    provider: s.provider,
+    billingMode: s.billingMode,
+    inputTokens: s.tokens.input,
+    outputTokens: s.tokens.output,
+    cacheReadTokens: s.tokens.cacheRead,
+    cacheWriteTokens: s.tokens.cacheWrite,
+    reasoningTokens: s.tokens.reasoning
+  }));
+}
+
 function bucketize(records: UsageRecord[], g: Granularity): BackfillBucket[] {
   const map = new Map<string, BackfillBucket>();
   for (const r of records) {
@@ -288,7 +311,7 @@ async function runPool<T>(items: T[], worker: (item: T) => Promise<void>, concur
 }
 
 /**
- * Import historical Claude Code, Codex + opencode usage into Autumn as backdated, daily/hourly-aggregated
+ * Import historical Claude Code, Codex, opencode + Droid usage into Autumn as backdated, daily/hourly-aggregated
  * `usage_in_usd` events. State lives in Autumn, not locally: a single `events.list` scan tells us
  * which buckets we've already backfilled AND which (harness, model, bucket) the live daemon already
  * covers — so re-runs fill only the GAPS the daemon missed and never double-count live usage. This
@@ -333,6 +356,9 @@ export async function runBackfill(
   }
   if (wantOpencode(opts.harness)) {
     records.push(...(await gatherOpencode({ since, until })));
+  }
+  if (wantDroid(opts.harness)) {
+    records.push(...(await gatherDroid({ since, until, force: opts.force })));
   }
 
   const buckets = bucketize(records, opts.granularity);
