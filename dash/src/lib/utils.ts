@@ -34,6 +34,7 @@ export function label(value: string): string {
   if (value === "unknown") return "Unknown";
   if (value === "claude_code") return "Claude Code";
   if (value === "codex") return "Codex";
+  if (value === "droid") return "Droid";
   if (value === "opencode") return "OpenCode";
   if (value === "pi") return "Pi";
   if (value === "api") return "API";

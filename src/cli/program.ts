@@ -20,6 +20,7 @@ import { type BackfillResult, type Granularity, type HarnessSelector, runBackfil
 import type { BillingMode, SummerAuth } from "../domain/types.ts";
 import { patchClaudeSettings, restoreClaudeSettings } from "../integrations/claude/settings.ts";
 import { patchCodexSettings, restoreCodexSettings } from "../integrations/codex/settings.ts";
+import { processDroidSessions } from "../integrations/droid/sessions.ts";
 import { choose, confirm, isInteractive } from "./prompts.ts";
 import { bold, dim } from "./style.ts";
 import {
@@ -401,6 +402,11 @@ program
       force?: boolean;
       idempotencySalt?: string;
     }) => {
+      if (opts.harness === "droid") {
+        console.error("Droid only supports live tracking. Use `summer droid --dry-run` to preview new usage.");
+        process.exitCode = 1;
+        return;
+      }
       const parseDate = (v: string | undefined, label: string): Date | undefined => {
         if (!v) return undefined;
         const d = new Date(v);
@@ -434,6 +440,41 @@ program
       printBackfill(res);
     }
   );
+
+program
+  .command("droid")
+  .description("Poll Factory Droid sessions once and track new usage.")
+  .option("--dry-run", "Show what the poll would send without sending anything")
+  .action(async (opts: { dryRun?: boolean }) => {
+    const auth = await readAuth();
+    if (!auth) {
+      console.log('Not logged in — run "summer login" first.');
+      return;
+    }
+    const dryRun = Boolean(opts.dryRun);
+    const deltas = await processDroidSessions(new AutumnClient(auth), auth, { dryRun });
+    const line = "─".repeat(60);
+    console.log(`\nSummer — Droid${dryRun ? " (DRY RUN — nothing sent)" : ""}`);
+    console.log(line);
+    if (deltas.length === 0) {
+      console.log("Nothing new — all recent Droid sessions are already tracked.");
+    } else {
+      for (const d of deltas) {
+        const t = d.tokens;
+        console.log(`${d.at.toISOString()}  ${d.provider}/${d.model}  [${d.billingMode}]  ${dim(d.sessionId)}`);
+        console.log(
+          `  in ${t.input.toLocaleString()}  out ${t.output.toLocaleString()}  cache-read ${t.cacheRead.toLocaleString()}  cache-write ${t.cacheWrite.toLocaleString()}  reasoning ${t.reasoning.toLocaleString()}`
+        );
+      }
+      console.log(line);
+      console.log(
+        dryRun
+          ? `${deltas.length} session delta(s) would be sent. Re-run without --dry-run to track them.`
+          : `Tracked ${deltas.length} session delta(s).`
+      );
+    }
+    console.log();
+  });
 
 program
   .command("dash")
@@ -516,7 +557,7 @@ async function maybeOfferBackfill(
 
 program
   .command("start")
-  .description("Set up (if needed) and start Summer — tracks Claude Code, Codex, OpenCode + Pi.")
+  .description("Set up (if needed) and start Summer — tracks Claude Code, Codex, OpenCode, Droid + Pi.")
   .option("--debug", "Run in the foreground with debug logs.")
   .option("--yes", "Skip the org confirmation prompt.")
   .option("--switch-org", "Log in again to choose a different Autumn org before setup.")
