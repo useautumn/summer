@@ -382,11 +382,11 @@ function printBackfill(res: BackfillResult) {
 
 program
   .command("backfill")
-  .description("Import historical Claude Code, Codex, OpenCode, Droid + Pi usage into Autumn (backdated, aggregated).")
+  .description("Import historical Claude Code, Codex, OpenCode + Pi usage into Autumn (backdated, aggregated).")
   .option("--since <date>", "Only backfill usage on/after this date (e.g. 2026-05-01)")
   .option("--until <date>", "Only backfill usage before this date (default: auto-cap at first live event)")
   .option("--granularity <granularity>", "Aggregation bucket: daily | hourly", "daily")
-  .option("--harness <harness>", "Which harness: claude | codex | opencode | droid | pi | all", "all")
+  .option("--harness <harness>", "Which harness: claude | codex | opencode | pi | all", "all")
   .option("--billing-mode <mode>", "Claude billing mode (transcripts don't record it): subscription | api", "subscription")
   .option("--dry-run", "Show what would be sent without sending anything")
   .option("--force", "Re-send buckets even if already present in Autumn (idempotency still dedups)")
@@ -402,6 +402,11 @@ program
       force?: boolean;
       idempotencySalt?: string;
     }) => {
+      if (opts.harness === "droid") {
+        console.error("Droid only supports live tracking. Use `summer droid --dry-run` to preview new usage.");
+        process.exitCode = 1;
+        return;
+      }
       const parseDate = (v: string | undefined, label: string): Date | undefined => {
         if (!v) return undefined;
         const d = new Date(v);
@@ -410,11 +415,7 @@ program
       };
       const granularity: Granularity = opts.granularity === "hourly" ? "hourly" : "daily";
       const harness: HarnessSelector =
-        opts.harness === "claude" ||
-        opts.harness === "codex" ||
-        opts.harness === "opencode" ||
-        opts.harness === "droid" ||
-        opts.harness === "pi"
+        opts.harness === "claude" || opts.harness === "codex" || opts.harness === "opencode" || opts.harness === "pi"
           ? opts.harness
           : "all";
       const billingMode: BillingMode = opts.billingMode === "api" ? "api" : "subscription";
@@ -424,7 +425,7 @@ program
       const auth = await ensureCustomer();
       const client = new AutumnClient(auth);
       console.log(
-        `Reading local ${harness === "all" ? "Claude Code, Codex, OpenCode, Droid + Pi" : harness} history…${opts.dryRun ? " (dry run)" : ""}`
+        `Reading local ${harness === "all" ? "Claude Code, Codex, OpenCode + Pi" : harness} history…${opts.dryRun ? " (dry run)" : ""}`
       );
       const res = await runBackfill(client, auth, {
         since,
@@ -542,7 +543,7 @@ async function maybeOfferBackfill(
   const state = await readState();
   if (state.backfillPromptedAt) return; // already asked once — use `summer backfill` to import later.
 
-  const doIt = await confirm("Import your existing Claude Code, Codex, OpenCode, Droid + Pi history now?", {
+  const doIt = await confirm("Import your existing Claude Code, Codex, OpenCode + Pi history now?", {
     default: opts.firstRun
   });
   await writeState({ ...(await readState()), backfillPromptedAt: new Date().toISOString() });

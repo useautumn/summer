@@ -6,6 +6,7 @@ import { USAGE_FEATURE } from "../../config/constants.ts";
 import { readState, writeState } from "../../config/storage.ts";
 import type { BillingMode, SummerAuth, SummerTotals } from "../../domain/types.ts";
 import { log, serializeError } from "../../logging/logger.ts";
+import { isDuplicateIdempotency } from "../../tracking/tracker.ts";
 
 const RECENT_MS = 2 * 24 * 60 * 60 * 1000;
 
@@ -17,8 +18,15 @@ export type DroidTokens = {
   reasoning: number;
 };
 
+const EMPTY_TOKENS: DroidTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
+const tokenTotal = (tokens: DroidTokens) =>
+  tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite + tokens.reasoning;
+const positiveNumber = (value: unknown) => {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
 export type DroidSession = {
-  file: string;
   sessionId: string;
   model: string;
   provider: string;
@@ -49,11 +57,6 @@ function factoryRoots(): string[] {
 
 /** Map Droid's model labels to the canonical Models.dev vendor namespace. */
 export function droidModelProvider(model: string, providerLock?: string): string | null {
-  const lock = providerLock?.toLowerCase();
-  if (lock && lock !== "factory") {
-    if (lock === "google-vertex") return "google";
-    if (["anthropic", "openai", "google", "xai", "moonshotai", "zhipuai"].includes(lock)) return lock;
-  }
   const value = model.toLowerCase();
   if (value.startsWith("claude-")) return "anthropic";
   if (/^(gpt-|o[134]-|codex-)/.test(value)) return "openai";
@@ -63,6 +66,9 @@ export function droidModelProvider(model: string, providerLock?: string): string
   if (value.startsWith("glm-")) return "zhipuai";
   if (value.startsWith("minimax-")) return "minimax";
   if (value.startsWith("deepseek-")) return "deepseek";
+  const lock = providerLock?.toLowerCase();
+  if (lock === "google-vertex") return "google";
+  if (lock && ["anthropic", "openai", "google", "xai", "moonshotai", "zhipuai"].includes(lock)) return lock;
   return null;
 }
 
@@ -91,7 +97,7 @@ async function listSettingsFiles(cutoffMs: number): Promise<string[]> {
         try {
           if ((await stat(path)).mtimeMs >= cutoffMs) out.push(path);
         } catch {
-          // Skip files that disappear during a Droid write.
+          // File may disappear during a Droid write.
         }
       }
     }
@@ -115,7 +121,7 @@ async function sessionTimestamp(settingsFile: string, fallbackMs: number): Promi
       const value = Date.parse((JSON.parse(line) as { timestamp?: string }).timestamp ?? "");
       if (Number.isFinite(value)) latest = Math.max(latest, value);
     } catch {
-      // Ignore a partial line while Droid is writing.
+      // Ignore partial writes.
     }
   }
   return new Date(latest || fallbackMs);
@@ -125,8 +131,7 @@ export async function parseDroidSession(file: string): Promise<DroidSession | nu
   let settings: DroidSettings;
   let info;
   try {
-    // Capture the mtime before reading. If Droid writes after this stat, the next poll sees a
-    // different mtime and parses again instead of recording new metadata against stale contents.
+    // Stat before reading so a concurrent write changes the mtime for the next poll.
     info = await stat(file);
     settings = JSON.parse(await readFile(file, "utf8")) as DroidSettings;
   } catch {
@@ -137,55 +142,21 @@ export async function parseDroidSession(file: string): Promise<DroidSession | nu
   if (!model || !provider) return null;
   const usage = settings.tokenUsage;
   if (!usage) return null;
-  const number = (value: unknown) => {
-    const parsed = Number(value ?? 0);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-  };
   return {
-    file,
     sessionId: basename(file, ".settings.json"),
     model,
     provider,
     billingMode: settings.providerLock && settings.providerLock !== "factory" ? "api" : "subscription",
     at: await sessionTimestamp(file, info.mtimeMs),
     tokens: {
-      input: number(usage.inputTokens),
-      output: number(usage.outputTokens),
-      cacheRead: number(usage.cacheReadTokens),
-      cacheWrite: number(usage.cacheCreationTokens),
-      reasoning: number(usage.thinkingTokens)
+      input: positiveNumber(usage.inputTokens),
+      output: positiveNumber(usage.outputTokens),
+      cacheRead: positiveNumber(usage.cacheReadTokens),
+      cacheWrite: positiveNumber(usage.cacheCreationTokens),
+      reasoning: positiveNumber(usage.thinkingTokens)
     },
     mtime: info.mtimeMs
   };
-}
-
-/**
- * All Droid sessions with last activity in [since, until) — for backfill. Droid stores only a
- * cumulative per-session `tokenUsage` (no per-message timeline), so each session yields ONE record
- * with its full totals, stamped at its last transcript timestamp (same derivation as the live
- * poller, so live-covered buckets match up). Sessions in `excludeFiles` (already tracked live) are
- * skipped: their history is in Autumn and the live poller keeps sending their future deltas.
- */
-export async function gatherDroidRecords(opts: {
-  since?: Date;
-  until?: Date;
-  excludeFiles?: Set<string>;
-}): Promise<DroidSession[]> {
-  const sinceMs = opts.since?.getTime();
-  const untilMs = opts.until?.getTime();
-  const out: DroidSession[] = [];
-  for (const file of await listSettingsFiles(0)) {
-    if (opts.excludeFiles?.has(file)) continue;
-    const session = await parseDroidSession(file);
-    if (!session) continue;
-    const t = session.tokens;
-    if (t.input + t.output + t.cacheRead + t.cacheWrite + t.reasoning <= 0) continue;
-    const atMs = session.at.getTime();
-    if (sinceMs != null && atMs < sinceMs) continue;
-    if (untilMs != null && atMs >= untilMs) continue;
-    out.push(session);
-  }
-  return out;
 }
 
 function isUnpriceableModel(error: unknown): boolean {
@@ -198,7 +169,6 @@ function emptyTotals(at: string): SummerTotals {
   return { since: at, prepaidUsd: 0, usageUsd: 0, usageRealUsd: 0, usageSubUsd: 0, inputTokens: 0, outputTokens: 0 };
 }
 
-/** A per-session token delta the poller sends (or, on dry run, would send) to Autumn. */
 export type DroidDelta = {
   sessionId: string;
   model: string;
@@ -237,21 +207,23 @@ export async function processDroidSessions(
     const session = await parseDroidSession(file);
     if (!session) continue;
     const current = session.tokens;
-    const base = prev ?? { mtime: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
-    const input = Math.max(0, current.input - base.input);
-    const output = Math.max(0, current.output - base.output);
-    const cacheRead = Math.max(0, current.cacheRead - base.cacheRead);
-    const cacheWrite = Math.max(0, current.cacheWrite - base.cacheWrite);
-    const reasoning = Math.max(0, current.reasoning - base.reasoning);
+    const base = prev ?? EMPTY_TOKENS;
+    const tokens: DroidTokens = {
+      input: Math.max(0, current.input - base.input),
+      output: Math.max(0, current.output - base.output),
+      cacheRead: Math.max(0, current.cacheRead - base.cacheRead),
+      cacheWrite: Math.max(0, current.cacheWrite - base.cacheWrite),
+      reasoning: Math.max(0, current.reasoning - base.reasoning)
+    };
 
-    if (input + output + cacheRead + cacheWrite + reasoning > 0) {
+    if (tokenTotal(tokens) > 0) {
       const planned: DroidDelta = {
         sessionId: session.sessionId,
         model: session.model,
         provider: session.provider,
         billingMode: session.billingMode,
         at: session.at,
-        tokens: { input, output, cacheRead, cacheWrite, reasoning }
+        tokens
       };
       if (dryRun) {
         deltas.push(planned);
@@ -263,11 +235,11 @@ export async function processDroidSessions(
           featureId: USAGE_FEATURE,
           modelId: `${session.provider}/${session.model}`,
           timestamp: session.at.getTime(),
-          inputTokens: input,
-          outputTokens: output,
-          cacheReadTokens: cacheRead,
-          cacheWriteTokens: cacheWrite,
-          reasoningTokens: reasoning,
+          inputTokens: tokens.input,
+          outputTokens: tokens.output,
+          cacheReadTokens: tokens.cacheRead,
+          cacheWriteTokens: tokens.cacheWrite,
+          reasoningTokens: tokens.reasoning,
           properties: {
             harness: "droid",
             billing_mode: session.billingMode,
@@ -283,15 +255,18 @@ export async function processDroidSessions(
         delta.usageUsd += value;
         if (session.billingMode === "api") delta.usageRealUsd += value;
         else delta.usageSubUsd += value;
-        delta.inputTokens += input + cacheRead;
-        delta.outputTokens += output + reasoning;
+        delta.inputTokens += tokens.input + tokens.cacheRead;
+        delta.outputTokens += tokens.output + tokens.reasoning;
         deltas.push(planned);
       } catch (error) {
-        if (!isUnpriceableModel(error)) {
+        if (isDuplicateIdempotency(error)) {
+          log.debug({ action: "droid_skip_duplicate", session: session.sessionId });
+        } else if (isUnpriceableModel(error)) {
+          log.debug({ action: "droid_skip_unpriceable", model: `${session.provider}/${session.model}` });
+        } else {
           log.warn({ action: "droid_usage_track_failed", error: serializeError(error), session: session.sessionId });
           continue;
         }
-        log.debug({ action: "droid_skip_unpriceable", model: `${session.provider}/${session.model}` });
       }
     } else if (dryRun) {
       continue;
