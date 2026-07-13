@@ -22,7 +22,7 @@ export type SummerUser = {
   name?: string | null;
 };
 
-export type UsageHarness = "claude_code" | "codex" | "opencode" | "droid";
+export type UsageHarness = "claude_code" | "codex" | "opencode" | "droid" | "pi";
 
 /**
  * How a developer's AI usage is paid for, derived from telemetry:
@@ -95,6 +95,8 @@ export type SummerState = {
     string,
     { mtime: number; input: number; output: number; cacheRead: number; cacheWrite: number; reasoning: number }
   >;
+  /** Pi assistant-message ids already tracked (sessionId:messageId → createdMs). */
+  piSeen?: Record<string, number>;
   /** The Autumn org the user confirmed to set Summer up in — gates the `start`/`setup` org prompt. */
   setup?: { orgId: string; confirmedAt: string };
   /** The installed on-boot autostart service (launchd on macOS, systemd --user on Linux). */

@@ -7,10 +7,11 @@ import { readClaudeUsageRecords } from "../integrations/claude/transcripts.ts";
 import { listCodexSessionFiles, parseSessionTimeline } from "../integrations/codex/sessions.ts";
 import { gatherDroidRecords } from "../integrations/droid/sessions.ts";
 import { gatherOpencodeRecords } from "../integrations/opencode/sessions.ts";
+import { gatherPiRecords } from "../integrations/pi/sessions.ts";
 import { log, serializeError } from "../logging/logger.ts";
 
 export type Granularity = "daily" | "hourly";
-export type HarnessSelector = "claude" | "codex" | "opencode" | "droid" | "all";
+export type HarnessSelector = "claude" | "codex" | "opencode" | "droid" | "pi" | "all";
 
 export type BackfillOptions = {
   since?: Date;
@@ -30,7 +31,7 @@ type UsageRecord = {
   at: Date;
   harness: UsageHarness;
   model: string;
-  /** Explicit Models.dev provider (opencode is multi-provider); else derived from harness. */
+  /** Explicit Models.dev provider for multi-provider harnesses; else derived from harness. */
   provider?: string;
   billingMode: BillingMode;
   inputTokens: number;
@@ -78,10 +79,16 @@ const wantClaude = (h: HarnessSelector) => h === "all" || h === "claude";
 const wantCodex = (h: HarnessSelector) => h === "all" || h === "codex";
 const wantOpencode = (h: HarnessSelector) => h === "all" || h === "opencode";
 const wantDroid = (h: HarnessSelector) => h === "all" || h === "droid";
+const wantPi = (h: HarnessSelector) => h === "all" || h === "pi";
 
-/** Models.dev model id for a bucket. opencode supplies its own provider; others derive from harness. */
+/** Models.dev model id for a bucket. Multi-provider harnesses supply their provider explicitly. */
 const modelIdOf = (b: { harness: UsageHarness; model: string; provider?: string }) =>
   b.provider ? `${b.provider}/${b.model}` : toModelId(b.harness, b.model);
+
+// Preserve the idempotency identity emitted by older releases for single-provider harnesses.
+// Multi-provider harnesses need the provider-qualified id to avoid cross-provider collisions.
+export const idempotencyModelOf = (b: { model: string; provider?: string }) =>
+  b.provider ? `${b.provider}/${b.model}` : b.model;
 
 /** Floor an instant to the start of its UTC day/hour (matches how live events + the dash bucket). */
 function floorBucket(at: Date, g: Granularity): number {
@@ -262,6 +269,14 @@ async function gatherDroid(opts: { since?: Date; until?: Date; force?: boolean }
   }));
 }
 
+async function gatherPi(opts: { since?: Date; until?: Date }): Promise<UsageRecord[]> {
+  return (await gatherPiRecords(opts)).map((r) => ({
+    at: new Date(r.createdMs), harness: "pi", model: r.model, provider: r.provider,
+    billingMode: r.billingMode, inputTokens: r.tokens.input, outputTokens: r.tokens.output,
+    cacheReadTokens: r.tokens.cacheRead, cacheWriteTokens: r.tokens.cacheWrite, reasoningTokens: 0
+  }));
+}
+
 function bucketize(records: UsageRecord[], g: Granularity): BackfillBucket[] {
   const map = new Map<string, BackfillBucket>();
   for (const r of records) {
@@ -311,7 +326,7 @@ async function runPool<T>(items: T[], worker: (item: T) => Promise<void>, concur
 }
 
 /**
- * Import historical Claude Code, Codex, opencode + Droid usage into Autumn as backdated, daily/hourly-aggregated
+ * Import historical Claude Code, Codex, OpenCode, Droid + Pi usage into Autumn as backdated, daily/hourly-aggregated
  * `usage_in_usd` events. State lives in Autumn, not locally: a single `events.list` scan tells us
  * which buckets we've already backfilled AND which (harness, model, bucket) the live daemon already
  * covers — so re-runs fill only the GAPS the daemon missed and never double-count live usage. This
@@ -360,6 +375,7 @@ export async function runBackfill(
   if (wantDroid(opts.harness)) {
     records.push(...(await gatherDroid({ since, until, force: opts.force })));
   }
+  if (wantPi(opts.harness)) records.push(...(await gatherPi({ since, until })));
 
   const buckets = bucketize(records, opts.granularity);
 
@@ -407,7 +423,7 @@ export async function runBackfill(
     // customerId MUST be in the key: Autumn scopes idempotency to org+env (NOT customer), so without
     // it two developers in the same org produce identical keys and collide — the second's events get
     // skipped as "duplicate", silently losing that developer's usage.
-    const idempotencyBase = `backfill:${customerId}:${b.harness}:${b.model}:${b.billingMode}:${opts.granularity}:${b.label}`;
+    const idempotencyBase = `backfill:${customerId}:${b.harness}:${idempotencyModelOf(b)}:${b.billingMode}:${opts.granularity}:${b.label}`;
     return {
       customerId,
       featureId: USAGE_FEATURE,

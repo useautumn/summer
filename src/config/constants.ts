@@ -47,7 +47,9 @@ export const HARNESS_PROVIDER: Record<UsageHarness, Provider> = {
   // is only used if an opencode event somehow lacks a provider.
   opencode: "anthropic",
   // Droid is multi-provider too; its session reader always supplies the inferred model provider.
-  droid: "anthropic"
+  droid: "anthropic",
+  // Pi is multi-provider; its session reader always provides the actual provider.
+  pi: "anthropic"
 };
 
 export const toModelId = (harness: UsageHarness, model: string) =>
